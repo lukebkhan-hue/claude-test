@@ -23,10 +23,35 @@ async function ensureOffscreen() {
   }
 }
 
+// Map notification IDs to tab IDs so we can focus the right tab on click.
+const notifToTab = {};
+
+// When user clicks a notification, focus/switch to the associated tab.
+chrome.notifications.onClicked.addListener((notifId) => {
+  const tabId = notifToTab[notifId];
+  if (tabId) {
+    chrome.tabs.update(tabId, { active: true });
+    chrome.tabs.get(tabId, (tab) => {
+      if (tab && tab.windowId) {
+        chrome.windows.update(tab.windowId, { focused: true });
+      }
+    });
+    // Tell the content script to scroll to the checkbox area again.
+    chrome.tabs.sendMessage(tabId, { type: "SCROLL_TO_CHECKBOX" }).catch(() => {});
+    delete notifToTab[notifId];
+  }
+});
+
 // Listen for messages from content scripts.
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "KEYWORD_MATCH") {
     handleMatch(msg, sender);
+    sendResponse({ ok: true });
+    return;
+  }
+
+  if (msg.type === "KEYWORD_MATCH_MANUAL") {
+    handleManualMatch(msg, sender);
     sendResponse({ ok: true });
     return;
   }
@@ -56,8 +81,9 @@ async function handleMatch(msg, sender) {
   const tabTitle = sender.tab?.title || "Unknown page";
   matchCounter++;
 
-  // Unique notification ID every time — never deduplicated.
   const notifId = `kw-${matchCounter}-${Date.now()}`;
+  const tabId = sender.tab?.id;
+
   chrome.notifications.create(notifId, {
     type: "basic",
     iconUrl: "icons/icon128.png",
@@ -66,7 +92,36 @@ async function handleMatch(msg, sender) {
     priority: 2,
   });
 
+  if (tabId) notifToTab[notifId] = tabId;
+
   // Play alert sound via offscreen document
+  try {
+    await ensureOffscreen();
+    chrome.runtime.sendMessage({ type: "PLAY_ALERT" });
+  } catch (err) {
+    console.error("Failed to play alert sound:", err);
+  }
+}
+
+async function handleManualMatch(msg, sender) {
+  const tabTitle = sender.tab?.title || "Unknown page";
+  const tabId = sender.tab?.id;
+  matchCounter++;
+
+  const notifId = `manual-${matchCounter}-${Date.now()}`;
+
+  chrome.notifications.create(notifId, {
+    type: "basic",
+    iconUrl: "icons/icon128.png",
+    title: "Action Required!",
+    message: `Keyword matched! Check the box and submit on: ${tabTitle}. Click here to go there.`,
+    priority: 2,
+    requireInteraction: true, // Keep notification visible until user clicks it.
+  });
+
+  if (tabId) notifToTab[notifId] = tabId;
+
+  // Play alert sound.
   try {
     await ensureOffscreen();
     chrome.runtime.sendMessage({ type: "PLAY_ALERT" });

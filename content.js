@@ -19,6 +19,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     runActions(msg.config);
     sendResponse({ ok: true });
   }
+
+  if (msg.type === "SCROLL_TO_CHECKBOX") {
+    // User clicked the notification — scroll to the checkbox area.
+    window.scrollTo(0, document.body.scrollHeight);
+    setTimeout(() => {
+      const checkbox = findBottomCheckbox();
+      if (checkbox) {
+        scrollToElement(checkbox);
+      }
+    }, 300);
+    sendResponse({ ok: true });
+  }
 });
 
 function runActions(cfg) {
@@ -187,11 +199,10 @@ function handleFollowUpPage() {
 
   // Allow time for scroll + any lazy-loaded content to appear.
   setTimeout(() => {
-    // Scroll again in case content grew after first scroll.
     window.scrollTo(0, document.body.scrollHeight);
 
     setTimeout(() => {
-      // Try: "Express Interest" button.
+      // Try: "Express Interest" button — auto-click this one.
       const expressBtn = findButtonByLabel("express interest");
       if (expressBtn) {
         console.log("[Keyword Monitor] Clicking 'Express Interest'.");
@@ -204,33 +215,38 @@ function handleFollowUpPage() {
         return;
       }
 
-      // Try: Checkbox at bottom + "Submit" button.
+      // Checkbox + Submit page — scroll to bottom and alert the user.
+      // User will manually check the box and click Submit.
       const checkbox = findBottomCheckbox();
       const submitBtn = findButtonByLabel("submit");
 
-      if (checkbox && submitBtn) {
-        console.log("[Keyword Monitor] Scrolling to checkbox, checking it, then submitting.");
-        // Scroll checkbox into view and click it.
-        scrollToElement(checkbox);
+      if (checkbox || submitBtn) {
+        console.log("[Keyword Monitor] Checkbox/Submit page detected. Scrolling to bottom and alerting user.");
+
+        // Scroll to the checkbox area so it's visible when user switches to the tab.
+        const target = checkbox || submitBtn;
+        scrollToElement(target);
+
+        // Send alert — notification click will bring user to this tab.
+        chrome.runtime.sendMessage({
+          type: "KEYWORD_MATCH_MANUAL",
+          keyword: "Action required — check the box and submit",
+          tabId: null, // background will use sender.tab
+        });
+
+        // Stay in FOLLOW_UP state — don't auto-reset.
+        // User will handle it manually, then navigate back.
+        // Set a longer timeout to eventually reset if user doesn't act.
         setTimeout(() => {
-          clickCheckbox(checkbox);
           chrome.runtime.sendMessage({
             type: "SET_STATE",
-            state: { phase: "COMPLETE" },
+            state: { phase: "SCANNING" },
           });
-          // Scroll to submit button and click it after a delay.
-          setTimeout(() => {
-            scrollToElement(submitBtn);
-            setTimeout(() => {
-              simulateClick(submitBtn);
-              resetAfterDelay();
-            }, 300);
-          }, 500);
-        }, 300);
+        }, 120000); // Reset after 2 minutes if no action.
         return;
       }
 
-      // Neither pattern found — retry after scrolling again.
+      // Neither pattern found — retry.
       console.log("[Keyword Monitor] No known actions found. Retrying in 1.5s...");
       setTimeout(() => {
         window.scrollTo(0, document.body.scrollHeight);
@@ -246,19 +262,19 @@ function handleFollowUpPage() {
 
           const checkbox2 = findBottomCheckbox();
           const submitBtn2 = findButtonByLabel("submit");
-          if (checkbox2 && submitBtn2) {
-            scrollToElement(checkbox2);
+          if (checkbox2 || submitBtn2) {
+            const target2 = checkbox2 || submitBtn2;
+            scrollToElement(target2);
+            chrome.runtime.sendMessage({
+              type: "KEYWORD_MATCH_MANUAL",
+              keyword: "Action required — check the box and submit",
+            });
             setTimeout(() => {
-              clickCheckbox(checkbox2);
-              chrome.runtime.sendMessage({ type: "SET_STATE", state: { phase: "COMPLETE" } });
-              setTimeout(() => {
-                scrollToElement(submitBtn2);
-                setTimeout(() => {
-                  simulateClick(submitBtn2);
-                  resetAfterDelay();
-                }, 300);
-              }, 500);
-            }, 300);
+              chrome.runtime.sendMessage({
+                type: "SET_STATE",
+                state: { phase: "SCANNING" },
+              });
+            }, 120000);
             return;
           }
 
