@@ -1,6 +1,9 @@
-// Background service worker — manages notifications and alert sound playback.
+// Background service worker — manages notifications, alert sound, and workflow state.
 
 const OFFSCREEN_DOC = "offscreen.html";
+
+// In-memory workflow state.
+let workflowState = { phase: "SCANNING" };
 
 // Ensure the offscreen document exists for playing audio.
 async function ensureOffscreen() {
@@ -17,11 +20,12 @@ async function ensureOffscreen() {
   }
 }
 
-// Listen for keyword match messages from content scripts.
+// Listen for messages from content scripts.
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "KEYWORD_MATCH") {
     handleMatch(msg, sender);
     sendResponse({ ok: true });
+    return;
   }
 
   if (msg.type === "GET_CONFIG") {
@@ -29,6 +33,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse(data);
     });
     return true; // async response
+  }
+
+  if (msg.type === "GET_STATE") {
+    sendResponse(workflowState);
+    return;
+  }
+
+  if (msg.type === "SET_STATE") {
+    workflowState = msg.state || { phase: "SCANNING" };
+    console.log("[Keyword Monitor] State →", workflowState.phase);
+    sendResponse({ ok: true });
+    return;
   }
 });
 
@@ -42,7 +58,7 @@ async function handleMatch(msg, sender) {
     type: "basic",
     iconUrl: "icons/icon128.png",
     title: "Keyword Detected!",
-    message: `"${keyword}" found (new occurrence #${count}) on ${tabTitle}`,
+    message: `"${keyword}" found (occurrence #${count}) on ${tabTitle}`,
     priority: 2,
   });
 
@@ -55,7 +71,7 @@ async function handleMatch(msg, sender) {
   }
 }
 
-// When a tab updates, notify the content script with current config.
+// When a tab finishes loading, send it the current config + state.
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === "complete" && tab.url) {
     chrome.storage.local.get(["targetUrl", "keywords", "enabled"], (data) => {
@@ -74,6 +90,10 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 // Re-inject config when storage changes so active tabs pick it up immediately.
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
+
+  // Reset workflow state when config changes (user hit Save).
+  workflowState = { phase: "SCANNING" };
+
   chrome.storage.local.get(["targetUrl", "keywords", "enabled"], (data) => {
     if (!data.enabled) return;
     chrome.tabs.query({}, (tabs) => {
