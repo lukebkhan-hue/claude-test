@@ -317,12 +317,62 @@ function getDirectText(el) {
 }
 
 function findBottomCheckbox() {
-  let checkboxes = [];
+  // ── 99designs / styled-components pattern ──
+  // The real <input type="checkbox"> has class "HiddenInput" (invisible).
+  // The visible clickable element is a sibling <div> with class containing
+  // "VisibleInput" or "ClickableInput".
 
-  // Strategy 1: Real <input type="checkbox"> elements.
-  checkboxes.push(...document.querySelectorAll('input[type="checkbox"]'));
+  // First, try to find the accept-statement checkbox by ID (99designs).
+  const acceptInput = document.querySelector('#accept-statement');
+  if (acceptInput) {
+    // Find the visible clickable sibling div.
+    const parent = acceptInput.parentElement;
+    if (parent) {
+      const visibleDiv = parent.querySelector(
+        '[class*="VisibleInput"], [class*="ClickableInput"], [class*="visible"]'
+      );
+      if (visibleDiv) {
+        console.log("[Keyword Monitor] Found VisibleInput sibling for #accept-statement");
+        return visibleDiv;
+      }
+    }
+    // If no visible sibling, return the input itself as fallback.
+    return acceptInput;
+  }
 
-  // Strategy 2: Custom checkbox elements (role, class names).
+  // ── Generic: find hidden checkbox + visible sibling pattern ──
+  const allCheckboxInputs = document.querySelectorAll('input[type="checkbox"]');
+  for (const input of allCheckboxInputs) {
+    const cls = (input.className || "").toLowerCase();
+    // Detect if this input is hidden (class contains "hidden", or zero size).
+    const rect = input.getBoundingClientRect();
+    const isHidden = cls.includes("hidden") || (rect.width === 0 && rect.height === 0) ||
+                     window.getComputedStyle(input).display === "none" ||
+                     window.getComputedStyle(input).visibility === "hidden" ||
+                     window.getComputedStyle(input).opacity === "0";
+
+    if (isHidden) {
+      // Look for a visible sibling that acts as the clickable checkbox.
+      const parent = input.parentElement;
+      if (parent) {
+        for (const sibling of parent.children) {
+          if (sibling === input) continue;
+          const sRect = sibling.getBoundingClientRect();
+          if (sRect.width > 0 && sRect.height > 0 && sRect.width <= 60 && sRect.height <= 60) {
+            console.log("[Keyword Monitor] Found visible sibling for hidden checkbox:", sibling.className);
+            return sibling;
+          }
+        }
+      }
+    }
+
+    // Not hidden — return it directly.
+    if (!isHidden) {
+      return input;
+    }
+  }
+
+  // ── Fallback: custom checkbox elements by role/class ──
   const customSelectors = [
     '[role="checkbox"]',
     '[class*="checkbox"]', '[class*="Checkbox"]',
@@ -330,86 +380,30 @@ function findBottomCheckbox() {
     '[data-testid*="checkbox"]',
     '[aria-checked]',
   ].join(", ");
-  for (const el of document.querySelectorAll(customSelectors)) {
-    if (!checkboxes.includes(el)) checkboxes.push(el);
+  const customCheckboxes = document.querySelectorAll(customSelectors);
+  if (customCheckboxes.length > 0) {
+    return getBottomMost(Array.from(customCheckboxes));
   }
 
-  // If we found standard checkboxes, return the bottom-most one.
-  if (checkboxes.length > 0) {
-    return getBottomMost(checkboxes);
-  }
-
-  // Strategy 3: Find the "I agree" / "Agreement" text and look for
-  // clickable elements near it — the checkbox is likely a sibling or
-  // a small element in the same container.
+  // ── Last resort: search near agreement text ──
   const agreementContainer = findAgreementContainer();
   if (!agreementContainer) return null;
 
-  // Look for anything clickable in that container.
-  // Try: labels, small square elements, SVGs, cursor:pointer elements.
-  const candidates = [];
-
-  // Labels in the container.
-  for (const lbl of agreementContainer.querySelectorAll("label")) {
-    candidates.push(lbl);
-  }
-
-  // All elements in the container — check if they look like a checkbox.
+  // Look for any small clickable element in the agreement area.
   for (const el of agreementContainer.querySelectorAll("*")) {
     const rect = el.getBoundingClientRect();
-    // Skip invisible or huge elements.
     if (rect.width === 0 || rect.height === 0) continue;
     if (rect.width > 60 || rect.height > 60) continue;
-
-    const style = window.getComputedStyle(el);
-    const isClickable = style.cursor === "pointer";
-    const hasBorder = style.borderStyle !== "none" && style.borderWidth !== "0px";
-    const isSvg = el.tagName === "svg" || el.tagName === "SVG" || el.querySelector("svg");
-    const isSmallSquare = rect.width <= 50 && rect.height <= 50 &&
-                          (rect.width / rect.height) > 0.5 &&
-                          (rect.width / rect.height) < 2;
-
-    if (isSmallSquare && (isClickable || hasBorder || isSvg)) {
-      candidates.push(el);
-    }
-  }
-
-  if (candidates.length > 0) {
-    return getBottomMost(candidates);
-  }
-
-  // Strategy 4: Look for hidden/off-screen <input type="checkbox"> elements
-  // inside the container. Some frameworks visually hide the real input and
-  // render a styled pseudo-element over it.
-  const hiddenInputs = agreementContainer.querySelectorAll('input[type="checkbox"]');
-  if (hiddenInputs.length > 0) {
-    return hiddenInputs[hiddenInputs.length - 1];
-  }
-
-  // Strategy 5: Look for ANY small element in the agreement container,
-  // regardless of border/cursor styles — it might be styled entirely with
-  // CSS pseudo-elements (::before / ::after).
-  for (const el of agreementContainer.querySelectorAll("*")) {
-    const rect = el.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) continue;
-    if (rect.width > 50 || rect.height > 50) continue;
     const ratio = rect.width / rect.height;
     if (ratio > 0.5 && ratio < 2) {
-      // Exclude text-heavy elements.
       const text = (el.textContent || "").trim();
       if (text.length <= 2) {
-        candidates.push(el);
+        return el;
       }
     }
   }
 
-  if (candidates.length > 0) {
-    return getBottomMost(candidates);
-  }
-
-  // Log what's in the container for debugging.
-  console.log("[Keyword Monitor] Agreement container HTML:", agreementContainer.innerHTML.substring(0, 500));
-
+  console.log("[Keyword Monitor] No checkbox found on page.");
   return null;
 }
 
@@ -524,7 +518,6 @@ function clickCheckbox(cb) {
     if (!cb.checked) {
       cb.focus();
       simulateClick(cb);
-      // If click didn't toggle it, force it.
       if (!cb.checked) {
         cb.checked = true;
         cb.dispatchEvent(new Event("change", { bubbles: true }));
@@ -534,32 +527,38 @@ function clickCheckbox(cb) {
     return;
   }
 
-  // For custom checkboxes (div/span with role="checkbox" etc.)
-  // Try clicking the element itself.
+  // This is a visible proxy element (e.g. ClickableInput__VisibleInput).
+  // Click it with full mouse event simulation.
   simulateClick(cb);
 
-  // Also try clicking the associated <label> if there is one.
-  const id = cb.getAttribute("id") || cb.getAttribute("data-id");
-  if (id) {
-    const label = document.querySelector(`label[for="${id}"]`);
-    if (label) simulateClick(label);
+  // Also find and force-check any hidden <input type="checkbox"> sibling.
+  // This ensures React/framework state is updated.
+  const parent = cb.parentElement;
+  if (parent) {
+    const hiddenInput = parent.querySelector('input[type="checkbox"]');
+    if (hiddenInput && !hiddenInput.checked) {
+      console.log("[Keyword Monitor] Force-checking hidden sibling input:", hiddenInput.id);
+      hiddenInput.checked = true;
+      hiddenInput.dispatchEvent(new Event("change", { bubbles: true }));
+      hiddenInput.dispatchEvent(new Event("input", { bubbles: true }));
+      // Also dispatch click on the hidden input in case React listens on it.
+      hiddenInput.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    }
   }
 
-  // Try clicking the parent label if the checkbox is nested inside one.
-  const parentLabel = cb.closest("label");
-  if (parentLabel && parentLabel !== cb) {
-    simulateClick(parentLabel);
-  }
-
-  // If this is a container, look inside for a real checkbox we may have missed.
-  const innerCheckbox = cb.querySelector('input[type="checkbox"]');
-  if (innerCheckbox && !innerCheckbox.checked) {
-    innerCheckbox.focus();
-    simulateClick(innerCheckbox);
-    if (!innerCheckbox.checked) {
-      innerCheckbox.checked = true;
-      innerCheckbox.dispatchEvent(new Event("change", { bubbles: true }));
-      innerCheckbox.dispatchEvent(new Event("input", { bubbles: true }));
+  // Walk up a few levels looking for a hidden input (may not be direct sibling).
+  let ancestor = parent;
+  for (let i = 0; i < 4; i++) {
+    if (!ancestor || !ancestor.parentElement) break;
+    ancestor = ancestor.parentElement;
+    const input = ancestor.querySelector('input[type="checkbox"]');
+    if (input && !input.checked) {
+      console.log("[Keyword Monitor] Force-checking ancestor input:", input.id);
+      input.checked = true;
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      break;
     }
   }
 
