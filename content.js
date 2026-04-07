@@ -231,8 +231,8 @@ function handleFollowUpPage() {
             setTimeout(async () => {
               await humanClick(submitBtn);
               resetAfterDelay();
-            }, 400);
-          }, 800);
+            }, 50 + Math.random() * 50);
+          }, 50 + Math.random() * 50);
         }, 500);
         return;
       }
@@ -274,8 +274,8 @@ function handleFollowUpPage() {
                 setTimeout(async () => {
                   await humanClick(submitBtn2);
                   resetAfterDelay();
-                }, 400);
-              }, 800);
+                }, 50 + Math.random() * 50);
+              }, 50 + Math.random() * 50);
             }, 500);
             return;
           }
