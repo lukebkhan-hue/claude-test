@@ -43,17 +43,44 @@ chrome.notifications.onClicked.addListener((notifId) => {
 });
 
 // ─── TRUSTED CLICK VIA DEBUGGER API ─────────────────────────────────────────
-// JS-dispatched events have isTrusted=false. The chrome.debugger API sends
-// real Input events through the DevTools Protocol — these are truly trusted.
+// Uses DevTools Protocol to send real browser-level input events.
+// Gets element coordinates AFTER attaching debugger (the debug banner shifts layout).
 
-async function trustedClick(tabId, x, y) {
+async function trustedClickBySelector(tabId, selector) {
   try {
     await chrome.debugger.attach({ tabId }, "1.3");
 
-    // Mouse move to target (human-like approach).
+    // Wait a moment for the debug bar to render and layout to settle.
+    await sleep(300);
+
+    // Get element coordinates from within the page AFTER debugger is attached
+    // (the debug bar shifts content down, so pre-calculated coords are wrong).
+    const result = await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
+      expression: `
+        (function() {
+          var el = document.querySelector('${selector}');
+          if (!el) return null;
+          el.scrollIntoView({ block: 'center' });
+          var rect = el.getBoundingClientRect();
+          return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+        })()
+      `,
+      returnByValue: true,
+    });
+
+    const coords = result.result?.value;
+    if (!coords) {
+      await chrome.debugger.detach({ tabId });
+      return { ok: false, error: "Element not found: " + selector };
+    }
+
+    const { x, y } = coords;
+    console.log("[Keyword Monitor] Trusted click at:", x, y, "for:", selector);
+
+    // Mouse move to target.
     const steps = 8;
-    const startX = x + (Math.random() - 0.5) * 200;
-    const startY = y - 80 - Math.random() * 120;
+    const startX = x + (Math.random() - 0.5) * 150;
+    const startY = y - 60 - Math.random() * 80;
 
     for (let i = 0; i <= steps; i++) {
       const t = i / steps;
@@ -62,30 +89,28 @@ async function trustedClick(tabId, x, y) {
       const cy = startY + (y - startY) * ease + (Math.random() - 0.5) * 2;
       await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
         type: "mouseMoved",
-        x: cx,
-        y: cy,
+        x: Math.round(cx),
+        y: Math.round(cy),
       });
       await sleep(10 + Math.random() * 15);
     }
 
-    // Brief pause before click.
     await sleep(30 + Math.random() * 50);
 
     // Mouse down.
     await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
       type: "mousePressed",
-      x, y,
+      x: Math.round(x), y: Math.round(y),
       button: "left",
       clickCount: 1,
     });
 
-    // Brief hold.
     await sleep(20 + Math.random() * 40);
 
     // Mouse up.
     await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
       type: "mouseReleased",
-      x, y,
+      x: Math.round(x), y: Math.round(y),
       button: "left",
       clickCount: 1,
     });
@@ -97,6 +122,108 @@ async function trustedClick(tabId, x, y) {
     try { await chrome.debugger.detach({ tabId }); } catch (_) {}
     return { ok: false, error: err.message };
   }
+}
+
+// Click checkbox then submit as a single debugger session (attach once).
+async function trustedCheckboxAndSubmit(tabId, checkboxSelector, submitSelector) {
+  try {
+    await chrome.debugger.attach({ tabId }, "1.3");
+    await sleep(400);
+
+    // Scroll to and get checkbox coords.
+    const cbResult = await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
+      expression: `
+        (function() {
+          var el = document.querySelector('${checkboxSelector}');
+          if (!el) return null;
+          el.scrollIntoView({ block: 'center' });
+          var rect = el.getBoundingClientRect();
+          return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+        })()
+      `,
+      returnByValue: true,
+    });
+
+    const cbCoords = cbResult.result?.value;
+    if (!cbCoords) {
+      await chrome.debugger.detach({ tabId });
+      return { ok: false, error: "Checkbox not found" };
+    }
+
+    // Click the checkbox.
+    await debuggerClickAt(tabId, cbCoords.x, cbCoords.y);
+    console.log("[Keyword Monitor] Checkbox clicked at:", cbCoords.x, cbCoords.y);
+
+    await sleep(800);
+
+    // Scroll to and get submit button coords.
+    const subResult = await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
+      expression: `
+        (function() {
+          var el = document.querySelector('${submitSelector}');
+          if (!el) {
+            // Fallback: find by text content.
+            var all = document.querySelectorAll('button, [role="button"], a, input[type="submit"]');
+            for (var i = 0; i < all.length; i++) {
+              if ((all[i].textContent || '').trim().toLowerCase().includes('submit')) {
+                el = all[i]; break;
+              }
+            }
+          }
+          if (!el) return null;
+          el.scrollIntoView({ block: 'center' });
+          var rect = el.getBoundingClientRect();
+          return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+        })()
+      `,
+      returnByValue: true,
+    });
+
+    const subCoords = subResult.result?.value;
+    if (!subCoords) {
+      await chrome.debugger.detach({ tabId });
+      return { ok: false, error: "Submit not found" };
+    }
+
+    // Click the submit button.
+    await debuggerClickAt(tabId, subCoords.x, subCoords.y);
+    console.log("[Keyword Monitor] Submit clicked at:", subCoords.x, subCoords.y);
+
+    await chrome.debugger.detach({ tabId });
+    return { ok: true };
+  } catch (err) {
+    console.error("[Keyword Monitor] Debugger checkbox+submit failed:", err);
+    try { await chrome.debugger.detach({ tabId }); } catch (_) {}
+    return { ok: false, error: err.message };
+  }
+}
+
+async function debuggerClickAt(tabId, x, y) {
+  x = Math.round(x);
+  y = Math.round(y);
+
+  // Brief mouse move approach.
+  const startX = x + (Math.random() - 0.5) * 100;
+  const startY = y - 40 - Math.random() * 60;
+  for (let i = 0; i <= 5; i++) {
+    const t = i / 5;
+    const cx = Math.round(startX + (x - startX) * t + (Math.random() - 0.5) * 2);
+    const cy = Math.round(startY + (y - startY) * t + (Math.random() - 0.5) * 2);
+    await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
+      type: "mouseMoved", x: cx, y: cy,
+    });
+    await sleep(10 + Math.random() * 10);
+  }
+
+  await sleep(20 + Math.random() * 30);
+
+  await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
+    type: "mousePressed", x, y, button: "left", clickCount: 1,
+  });
+  await sleep(20 + Math.random() * 30);
+  await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
+    type: "mouseReleased", x, y, button: "left", clickCount: 1,
+  });
 }
 
 function sleep(ms) {
@@ -117,16 +244,28 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return;
   }
 
-  if (msg.type === "TRUSTED_CLICK") {
+  if (msg.type === "TRUSTED_CLICK_SELECTOR") {
     const tabId = sender.tab?.id;
     if (tabId) {
-      trustedClick(tabId, msg.x, msg.y).then(result => {
+      trustedClickBySelector(tabId, msg.selector).then(result => {
         sendResponse(result);
       });
     } else {
       sendResponse({ ok: false, error: "No tab ID" });
     }
-    return true; // async response
+    return true;
+  }
+
+  if (msg.type === "TRUSTED_CHECKBOX_SUBMIT") {
+    const tabId = sender.tab?.id;
+    if (tabId) {
+      trustedCheckboxAndSubmit(tabId, msg.checkboxSelector, msg.submitSelector).then(result => {
+        sendResponse(result);
+      });
+    } else {
+      sendResponse({ ok: false, error: "No tab ID" });
+    }
+    return true;
   }
 
   if (msg.type === "GET_CONFIG") {

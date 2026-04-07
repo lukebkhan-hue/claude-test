@@ -207,23 +207,29 @@ function handleFollowUpPage() {
       // Try: "Express Interest" button.
       const expressBtn = findButtonByLabel("express interest");
       if (expressBtn) {
-        console.log("[Keyword Monitor] Found 'Express Interest'. Clicking.");
-        scrollToElement(expressBtn);
-        setTimeout(async () => {
-          await humanClick(expressBtn);
+        console.log("[Keyword Monitor] Found 'Express Interest'. Trusted-clicking.");
+        chrome.runtime.sendMessage({
+          type: "TRUSTED_CLICK_SELECTOR",
+          selector: '[class*="express"], button, a',
+        }, (result) => {
+          console.log("[Keyword Monitor] Express Interest result:", result);
+          // Fallback: also try humanClick.
+          humanClick(expressBtn);
           chrome.runtime.sendMessage({ type: "SET_STATE", state: { phase: "COMPLETE" } });
           resetAfterDelay();
-        }, 300);
+        });
         return;
       }
 
-      // Try: 99designs specific — label + submit.
-      const label = document.querySelector('label[for="accept-statement"]');
-      const submitBtn = findButtonByLabel("submit");
+      // Try: checkbox + submit page.
+      // Check if we have the 99designs accept-statement checkbox.
+      const hasCheckbox = document.querySelector('#accept-statement') ||
+                          document.querySelector('label[for="accept-statement"]') ||
+                          findBottomCheckbox();
+      const hasSubmit = findButtonByLabel("submit");
 
-      if (label && submitBtn) {
-        console.log("[Keyword Monitor] Found label + submit. Using TRUSTED clicks.");
-        scrollToElement(label);
+      if (hasCheckbox && hasSubmit) {
+        console.log("[Keyword Monitor] Found checkbox + submit. Delegating to background for trusted clicks.");
 
         chrome.runtime.sendMessage({
           type: "KEYWORD_MATCH",
@@ -231,89 +237,43 @@ function handleFollowUpPage() {
           count: 1,
         });
 
-        setTimeout(() => {
-          const labelRect = label.getBoundingClientRect();
-          const lx = labelRect.left + labelRect.width / 2;
-          const ly = labelRect.top + labelRect.height / 2;
-
-          chrome.runtime.sendMessage({
-            type: "TRUSTED_CLICK", x: lx, y: ly,
-          }, (result) => {
-            console.log("[Keyword Monitor] Trusted checkbox click result:", result);
-
-            // Wait then click submit.
-            setTimeout(() => {
-              scrollToElement(submitBtn);
-              setTimeout(() => {
-                const subRect = submitBtn.getBoundingClientRect();
-                const sx = subRect.left + subRect.width / 2;
-                const sy = subRect.top + subRect.height / 2;
-
-                chrome.runtime.sendMessage({
-                  type: "TRUSTED_CLICK", x: sx, y: sy,
-                }, (result2) => {
-                  console.log("[Keyword Monitor] Trusted submit click result:", result2);
-                  chrome.runtime.sendMessage({ type: "SET_STATE", state: { phase: "COMPLETE" } });
-                  resetAfterDelay();
-                });
-              }, 200);
-            }, 800);
-          });
-        }, 500);
-        return;
-      }
-
-      // Try: generic checkbox + submit.
-      const checkbox = findBottomCheckbox();
-      if (checkbox && submitBtn) {
-        console.log("[Keyword Monitor] Found checkbox + submit. Using TRUSTED clicks.");
-        scrollToElement(checkbox);
-        setTimeout(() => {
-          const cbRect = checkbox.getBoundingClientRect();
-          const cx = cbRect.left + cbRect.width / 2;
-          const cy = cbRect.top + cbRect.height / 2;
-
-          chrome.runtime.sendMessage({
-            type: "TRUSTED_CLICK", x: cx, y: cy,
-          }, () => {
-            setTimeout(() => {
-              scrollToElement(submitBtn);
-              setTimeout(() => {
-                const subRect = submitBtn.getBoundingClientRect();
-                const sx = subRect.left + subRect.width / 2;
-                const sy = subRect.top + subRect.height / 2;
-
-                chrome.runtime.sendMessage({
-                  type: "TRUSTED_CLICK", x: sx, y: sy,
-                }, () => {
-                  chrome.runtime.sendMessage({ type: "SET_STATE", state: { phase: "COMPLETE" } });
-                  resetAfterDelay();
-                });
-              }, 200);
-            }, 800);
-          });
-        }, 500);
-        return;
-      }
-
-      // If only submit found (no checkbox), just click submit with trusted click.
-      if (submitBtn) {
-        scrollToElement(submitBtn);
-        setTimeout(() => {
-          const subRect = submitBtn.getBoundingClientRect();
-          chrome.runtime.sendMessage({
-            type: "TRUSTED_CLICK",
-            x: subRect.left + subRect.width / 2,
-            y: subRect.top + subRect.height / 2,
-          }, () => {
+        // Let background handle everything via debugger —
+        // it will scroll, find, and click elements with correct coords.
+        chrome.runtime.sendMessage({
+          type: "TRUSTED_CHECKBOX_SUBMIT",
+          checkboxSelector: 'label[for="accept-statement"]',
+          submitSelector: 'button, [role="button"], input[type="submit"]',
+        }, (result) => {
+          console.log("[Keyword Monitor] Trusted checkbox+submit result:", result);
+          if (result?.ok) {
             chrome.runtime.sendMessage({ type: "SET_STATE", state: { phase: "COMPLETE" } });
             resetAfterDelay();
-          });
-        }, 300);
+          } else {
+            // Trusted click failed — retry.
+            console.log("[Keyword Monitor] Trusted click failed, retrying...");
+            if (attempts < maxAttempts) {
+              setTimeout(tryActions, 1500);
+            } else {
+              resetToScanning();
+            }
+          }
+        });
         return;
       }
 
-      // Nothing found yet — retry if under max attempts.
+      // If only submit found, click it.
+      if (hasSubmit) {
+        chrome.runtime.sendMessage({
+          type: "TRUSTED_CLICK_SELECTOR",
+          selector: 'button, [role="button"], input[type="submit"]',
+        }, () => {
+          chrome.runtime.sendMessage({ type: "SET_STATE", state: { phase: "COMPLETE" } });
+          resetAfterDelay();
+        });
+        return;
+      }
+
+      // Nothing found yet — retry.
       if (attempts < maxAttempts) {
         console.log("[Keyword Monitor] Elements not found yet. Retrying in 1s...");
         setTimeout(tryActions, 1000);
@@ -321,7 +281,7 @@ function handleFollowUpPage() {
         console.log("[Keyword Monitor] Max attempts reached. Returning to scan mode.");
         resetToScanning();
       }
-    }, 500); // Wait after scroll for content to render.
+    }, 500);
   }
 
   // Start first attempt after a delay for page to load.
