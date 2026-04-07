@@ -337,13 +337,20 @@ function getDirectText(el) {
 function findBottomCheckbox() {
   // ── 99designs / styled-components pattern ──
   // The real <input type="checkbox"> has class "HiddenInput" (invisible).
-  // The visible clickable element is a sibling <div> with class containing
-  // "VisibleInput" or "ClickableInput".
+  // There's a <label for="accept-statement"> that natively toggles it.
+  // Clicking the label is the most reliable approach.
 
   // First, try to find the accept-statement checkbox by ID (99designs).
   const acceptInput = document.querySelector('#accept-statement');
   if (acceptInput) {
-    // Find the visible clickable sibling div.
+    // Best target: the <label for="accept-statement"> element.
+    const label = document.querySelector('label[for="accept-statement"]');
+    if (label) {
+      console.log("[Keyword Monitor] Found <label for='accept-statement'> — using it as click target");
+      return label;
+    }
+
+    // Fallback: the VisibleInput div.
     const parent = acceptInput.parentElement;
     if (parent) {
       const visibleDiv = parent.querySelector(
@@ -354,15 +361,22 @@ function findBottomCheckbox() {
         return visibleDiv;
       }
     }
-    // If no visible sibling, return the input itself as fallback.
     return acceptInput;
   }
 
-  // ── Generic: find hidden checkbox + visible sibling pattern ──
+  // ── Generic: find any checkbox input and its associated label ──
   const allCheckboxInputs = document.querySelectorAll('input[type="checkbox"]');
   for (const input of allCheckboxInputs) {
+    // First, try to find a <label for="..."> that targets this input.
+    if (input.id) {
+      const label = document.querySelector(`label[for="${input.id}"]`);
+      if (label) {
+        console.log("[Keyword Monitor] Found label for checkbox #" + input.id);
+        return label;
+      }
+    }
+
     const cls = (input.className || "").toLowerCase();
-    // Detect if this input is hidden (class contains "hidden", or zero size).
     const rect = input.getBoundingClientRect();
     const isHidden = cls.includes("hidden") || (rect.width === 0 && rect.height === 0) ||
                      window.getComputedStyle(input).display === "none" ||
@@ -625,14 +639,21 @@ function simulateClick(el) {
 }
 
 async function clickCheckbox(cb) {
-  console.log("[Keyword Monitor] clickCheckbox target:", cb.tagName, cb.className, cb.id);
+  console.log("[Keyword Monitor] clickCheckbox target:", cb.tagName, cb.className);
+
+  // If this is a <label for="...">, just human-click it.
+  // The browser natively toggles the associated input via the `for` attribute.
+  if (cb.tagName === "LABEL") {
+    console.log("[Keyword Monitor] Clicking <label> — browser will toggle the checkbox natively.");
+    await humanClick(cb);
+    return;
+  }
 
   // For real <input type="checkbox">, simulate human click.
   if (cb.tagName === "INPUT" && cb.type === "checkbox") {
     if (!cb.checked) {
       cb.focus();
       await humanClick(cb);
-      // If click didn't toggle it, force it.
       if (!cb.checked) {
         cb.checked = true;
         cb.dispatchEvent(new Event("change", { bubbles: true }));
@@ -642,43 +663,22 @@ async function clickCheckbox(cb) {
     return;
   }
 
-  // This is a visible proxy element (e.g. ClickableInput__VisibleInput).
-  // Human-like click on the visible element.
+  // Visible proxy element (e.g. ClickableInput__VisibleInput).
   await humanClick(cb);
 
-  // Also find and force-check any hidden <input type="checkbox"> sibling.
-  const parent = cb.parentElement;
-  if (parent) {
-    const hiddenInput = parent.querySelector('input[type="checkbox"]');
-    if (hiddenInput && !hiddenInput.checked) {
-      console.log("[Keyword Monitor] Force-checking hidden sibling input:", hiddenInput.id);
-      hiddenInput.checked = true;
-      hiddenInput.dispatchEvent(new Event("change", { bubbles: true }));
-      hiddenInput.dispatchEvent(new Event("input", { bubbles: true }));
-      hiddenInput.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    }
-  }
-
-  // Walk up a few levels looking for a hidden input.
-  let ancestor = parent;
-  for (let i = 0; i < 4; i++) {
+  // Also find and force-check any hidden <input type="checkbox"> nearby.
+  let ancestor = cb;
+  for (let i = 0; i < 5; i++) {
     if (!ancestor || !ancestor.parentElement) break;
     ancestor = ancestor.parentElement;
     const input = ancestor.querySelector('input[type="checkbox"]');
     if (input && !input.checked) {
-      console.log("[Keyword Monitor] Force-checking ancestor input:", input.id);
+      console.log("[Keyword Monitor] Force-checking input:", input.id);
       input.checked = true;
       input.dispatchEvent(new Event("change", { bubbles: true }));
       input.dispatchEvent(new Event("input", { bubbles: true }));
-      input.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       break;
     }
-  }
-
-  // Try toggling aria-checked for accessible custom checkboxes.
-  const ariaChecked = cb.getAttribute("aria-checked");
-  if (ariaChecked === "false") {
-    cb.setAttribute("aria-checked", "true");
   }
 }
 
