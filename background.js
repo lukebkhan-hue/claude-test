@@ -5,6 +5,9 @@ const OFFSCREEN_DOC = "offscreen.html";
 // In-memory workflow state.
 let workflowState = { phase: "SCANNING" };
 
+// Global match counter to ensure every notification is unique.
+let matchCounter = 0;
+
 // Ensure the offscreen document exists for playing audio.
 async function ensureOffscreen() {
   const contexts = await chrome.runtime.getContexts({
@@ -49,16 +52,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 async function handleMatch(msg, sender) {
-  const { keyword, count } = msg;
+  const { keyword } = msg;
   const tabTitle = sender.tab?.title || "Unknown page";
+  matchCounter++;
 
-  // Show browser notification
-  const notifId = `kw-${keyword}-${Date.now()}`;
+  // Unique notification ID every time — never deduplicated.
+  const notifId = `kw-${matchCounter}-${Date.now()}`;
   chrome.notifications.create(notifId, {
     type: "basic",
     iconUrl: "icons/icon128.png",
     title: "Keyword Detected!",
-    message: `"${keyword}" found (occurrence #${count}) on ${tabTitle}`,
+    message: `"${keyword}" found (alert #${matchCounter}) on ${tabTitle}`,
     priority: 2,
   });
 
