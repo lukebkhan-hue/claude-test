@@ -20,17 +20,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendResponse({ ok: true });
   }
 
-  if (msg.type === "SCROLL_TO_CHECKBOX") {
-    // User clicked the notification — scroll to the checkbox area.
-    window.scrollTo(0, document.body.scrollHeight);
-    setTimeout(() => {
-      const checkbox = findBottomCheckbox();
-      if (checkbox) {
-        scrollToElement(checkbox);
-      }
-    }, 300);
-    sendResponse({ ok: true });
-  }
 });
 
 function runActions(cfg) {
@@ -47,15 +36,6 @@ function runActions(cfg) {
       handleScanningPhase();
     } else if (phase === "FOLLOW_UP") {
       handleFollowUpPage();
-    } else if (phase === "WAITING_FOR_USER") {
-      // Do nothing — user needs to manually check box and submit.
-      // Just keep the page scrolled to the checkbox.
-      console.log("[Keyword Monitor] Waiting for user to check box and submit.");
-      window.scrollTo(0, document.body.scrollHeight);
-      setTimeout(() => {
-        const checkbox = findBottomCheckbox();
-        if (checkbox) scrollToElement(checkbox);
-      }, 300);
     }
   });
 }
@@ -224,33 +204,47 @@ function handleFollowUpPage() {
         return;
       }
 
-      // Checkbox + Submit page — scroll to bottom and alert the user.
-      // User will manually check the box and click Submit.
+      // Checkbox + Submit page — auto-click with human-like mouse movement.
       const checkbox = findBottomCheckbox();
       const submitBtn = findButtonByLabel("submit");
 
-      if (checkbox || submitBtn) {
-        console.log("[Keyword Monitor] Checkbox/Submit page detected. Scrolling to bottom and alerting user.");
+      if (checkbox && submitBtn) {
+        console.log("[Keyword Monitor] Checkbox/Submit page detected. Human-clicking checkbox then submit.");
+        scrollToElement(checkbox);
 
-        // Set state to WAITING — stops all auto-refresh and auto-actions.
+        // Send alert notification.
         chrome.runtime.sendMessage({
-          type: "SET_STATE",
-          state: { phase: "WAITING_FOR_USER" },
+          type: "KEYWORD_MATCH",
+          keyword: "checkbox page reached",
+          count: 1,
         });
 
-        // Scroll to the checkbox area so it's visible when user switches to the tab.
-        const target = checkbox || submitBtn;
-        scrollToElement(target);
+        setTimeout(async () => {
+          await clickCheckbox(checkbox);
+          chrome.runtime.sendMessage({
+            type: "SET_STATE",
+            state: { phase: "COMPLETE" },
+          });
+          // Wait then click submit.
+          setTimeout(async () => {
+            scrollToElement(submitBtn);
+            setTimeout(async () => {
+              await humanClick(submitBtn);
+              resetAfterDelay();
+            }, 400);
+          }, 800);
+        }, 500);
+        return;
+      }
 
-        // Send alert — notification click will bring user to this tab.
-        chrome.runtime.sendMessage({
-          type: "KEYWORD_MATCH_MANUAL",
-          keyword: "Action required — check the box and submit",
-          tabId: null, // background will use sender.tab
-        });
-
-        // Everything stops here. No refresh, no reset.
-        // User handles it manually.
+      // If only submit found (no checkbox), just click submit.
+      if (submitBtn) {
+        scrollToElement(submitBtn);
+        setTimeout(async () => {
+          await humanClick(submitBtn);
+          chrome.runtime.sendMessage({ type: "SET_STATE", state: { phase: "COMPLETE" } });
+          resetAfterDelay();
+        }, 500);
         return;
       }
 
@@ -270,17 +264,19 @@ function handleFollowUpPage() {
 
           const checkbox2 = findBottomCheckbox();
           const submitBtn2 = findButtonByLabel("submit");
-          if (checkbox2 || submitBtn2) {
-            chrome.runtime.sendMessage({
-              type: "SET_STATE",
-              state: { phase: "WAITING_FOR_USER" },
-            });
-            const target2 = checkbox2 || submitBtn2;
-            scrollToElement(target2);
-            chrome.runtime.sendMessage({
-              type: "KEYWORD_MATCH_MANUAL",
-              keyword: "Action required — check the box and submit",
-            });
+          if (checkbox2 && submitBtn2) {
+            scrollToElement(checkbox2);
+            setTimeout(async () => {
+              await clickCheckbox(checkbox2);
+              chrome.runtime.sendMessage({ type: "SET_STATE", state: { phase: "COMPLETE" } });
+              setTimeout(async () => {
+                scrollToElement(submitBtn2);
+                setTimeout(async () => {
+                  await humanClick(submitBtn2);
+                  resetAfterDelay();
+                }, 400);
+              }, 800);
+            }, 500);
             return;
           }
 
@@ -499,7 +495,7 @@ function resetToScanning() {
   }
 }
 
-// ─── SCROLL + CLICK HELPERS ─────────────────────────────────────────────────
+// ─── HUMAN-LIKE MOUSE SIMULATION ────────────────────────────────────────────
 
 function scrollToElement(el) {
   el.scrollIntoView({ behavior: "instant", block: "center" });
@@ -508,38 +504,135 @@ function scrollToElement(el) {
 function scrollToAndClick(el) {
   scrollToElement(el);
   setTimeout(() => {
-    simulateClick(el);
+    humanClick(el);
   }, 200);
 }
 
-function simulateClick(el) {
-  // Dispatch a full sequence of mouse events to trigger framework handlers.
-  const events = ["pointerdown", "mousedown", "pointerup", "mouseup", "click"];
-  for (const evtName of events) {
+// Simulate realistic human mouse movement along a curved path, then click.
+// Returns a Promise that resolves after the click is done.
+function humanClick(el) {
+  return new Promise((resolve) => {
     const rect = el.getBoundingClientRect();
-    const x = rect.left + rect.width / 2;
-    const y = rect.top + rect.height / 2;
-    const evt = new MouseEvent(evtName, {
-      bubbles: true,
-      cancelable: true,
-      view: window,
-      clientX: x,
-      clientY: y,
-    });
-    el.dispatchEvent(evt);
-  }
-  // Also call .click() as a fallback.
-  el.click();
+    const targetX = rect.left + rect.width / 2 + (Math.random() - 0.5) * (rect.width * 0.3);
+    const targetY = rect.top + rect.height / 2 + (Math.random() - 0.5) * (rect.height * 0.3);
+
+    // Start from a random offset position (simulates cursor coming from elsewhere).
+    const startX = targetX + (Math.random() - 0.5) * 300 - 150;
+    const startY = targetY - 100 - Math.random() * 200;
+
+    // Generate a Bezier curve path with some randomness.
+    const steps = 15 + Math.floor(Math.random() * 10); // 15–25 steps
+    const points = generateCurvePath(startX, startY, targetX, targetY, steps);
+
+    let i = 0;
+
+    function moveNext() {
+      if (i < points.length) {
+        const p = points[i];
+        const moveEvt = new MouseEvent("mousemove", {
+          bubbles: true,
+          cancelable: true,
+          view: window,
+          clientX: p.x,
+          clientY: p.y,
+        });
+        // Dispatch on document and the element.
+        document.dispatchEvent(moveEvt);
+
+        // When we get close, also dispatch mouseenter/mouseover on the target.
+        if (i === points.length - 3) {
+          el.dispatchEvent(new MouseEvent("mouseenter", {
+            bubbles: true, view: window, clientX: p.x, clientY: p.y,
+          }));
+          el.dispatchEvent(new MouseEvent("mouseover", {
+            bubbles: true, view: window, clientX: p.x, clientY: p.y,
+          }));
+        }
+
+        i++;
+        // Variable delay between moves: 8–25ms (human-like).
+        const delay = 8 + Math.random() * 17;
+        setTimeout(moveNext, delay);
+      } else {
+        // Mouse is now over the target — pause briefly, then click.
+        const pauseBeforeClick = 50 + Math.random() * 100;
+        setTimeout(() => {
+          performClick(el, targetX, targetY);
+          resolve();
+        }, pauseBeforeClick);
+      }
+    }
+
+    moveNext();
+  });
 }
 
-function clickCheckbox(cb) {
+function generateCurvePath(x0, y0, x1, y1, steps) {
+  // Quadratic Bezier with a random control point for natural curvature.
+  const cpX = (x0 + x1) / 2 + (Math.random() - 0.5) * 100;
+  const cpY = (y0 + y1) / 2 + (Math.random() - 0.5) * 80;
+
+  const points = [];
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    // Ease-out: faster start, slower approach (like a human).
+    const ease = 1 - Math.pow(1 - t, 2);
+
+    const x = (1 - ease) * (1 - ease) * x0 + 2 * (1 - ease) * ease * cpX + ease * ease * x1;
+    const y = (1 - ease) * (1 - ease) * y0 + 2 * (1 - ease) * ease * cpY + ease * ease * y1;
+
+    // Add tiny jitter to simulate hand tremor.
+    const jitterX = (Math.random() - 0.5) * 2;
+    const jitterY = (Math.random() - 0.5) * 2;
+
+    points.push({ x: x + jitterX, y: y + jitterY });
+  }
+  return points;
+}
+
+function performClick(el, x, y) {
+  const commonOpts = {
+    bubbles: true,
+    cancelable: true,
+    view: window,
+    clientX: x,
+    clientY: y,
+    screenX: x + window.screenX,
+    screenY: y + window.screenY,
+    button: 0,
+    buttons: 1,
+  };
+
+  // Full realistic event sequence.
+  el.dispatchEvent(new PointerEvent("pointerdown", { ...commonOpts, pointerId: 1, pointerType: "mouse" }));
+  el.dispatchEvent(new MouseEvent("mousedown", commonOpts));
+
+  // Brief hold (humans don't release instantly).
+  setTimeout(() => {
+    const releaseOpts = { ...commonOpts, buttons: 0 };
+    el.dispatchEvent(new PointerEvent("pointerup", { ...releaseOpts, pointerId: 1, pointerType: "mouse" }));
+    el.dispatchEvent(new MouseEvent("mouseup", releaseOpts));
+    el.dispatchEvent(new MouseEvent("click", releaseOpts));
+
+    // Also call native .click() as fallback.
+    el.click();
+  }, 30 + Math.random() * 50);
+}
+
+// Legacy wrapper used in some places.
+function simulateClick(el) {
+  humanClick(el);
+}
+
+async function clickCheckbox(cb) {
   console.log("[Keyword Monitor] clickCheckbox target:", cb.tagName, cb.className, cb.id);
 
-  // For real <input type="checkbox">, set checked and fire change event.
+  // For real <input type="checkbox">, simulate human click.
   if (cb.tagName === "INPUT" && cb.type === "checkbox") {
     if (!cb.checked) {
       cb.focus();
-      simulateClick(cb);
+      await humanClick(cb);
+      // If click didn't toggle it, force it.
       if (!cb.checked) {
         cb.checked = true;
         cb.dispatchEvent(new Event("change", { bubbles: true }));
@@ -550,11 +643,10 @@ function clickCheckbox(cb) {
   }
 
   // This is a visible proxy element (e.g. ClickableInput__VisibleInput).
-  // Click it with full mouse event simulation.
-  simulateClick(cb);
+  // Human-like click on the visible element.
+  await humanClick(cb);
 
   // Also find and force-check any hidden <input type="checkbox"> sibling.
-  // This ensures React/framework state is updated.
   const parent = cb.parentElement;
   if (parent) {
     const hiddenInput = parent.querySelector('input[type="checkbox"]');
@@ -563,12 +655,11 @@ function clickCheckbox(cb) {
       hiddenInput.checked = true;
       hiddenInput.dispatchEvent(new Event("change", { bubbles: true }));
       hiddenInput.dispatchEvent(new Event("input", { bubbles: true }));
-      // Also dispatch click on the hidden input in case React listens on it.
       hiddenInput.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     }
   }
 
-  // Walk up a few levels looking for a hidden input (may not be direct sibling).
+  // Walk up a few levels looking for a hidden input.
   let ancestor = parent;
   for (let i = 0; i < 4; i++) {
     if (!ancestor || !ancestor.parentElement) break;
