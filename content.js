@@ -47,6 +47,15 @@ function runActions(cfg) {
       handleScanningPhase();
     } else if (phase === "FOLLOW_UP") {
       handleFollowUpPage();
+    } else if (phase === "WAITING_FOR_USER") {
+      // Do nothing — user needs to manually check box and submit.
+      // Just keep the page scrolled to the checkbox.
+      console.log("[Keyword Monitor] Waiting for user to check box and submit.");
+      window.scrollTo(0, document.body.scrollHeight);
+      setTimeout(() => {
+        const checkbox = findBottomCheckbox();
+        if (checkbox) scrollToElement(checkbox);
+      }, 300);
     }
   });
 }
@@ -223,6 +232,12 @@ function handleFollowUpPage() {
       if (checkbox || submitBtn) {
         console.log("[Keyword Monitor] Checkbox/Submit page detected. Scrolling to bottom and alerting user.");
 
+        // Set state to WAITING — stops all auto-refresh and auto-actions.
+        chrome.runtime.sendMessage({
+          type: "SET_STATE",
+          state: { phase: "WAITING_FOR_USER" },
+        });
+
         // Scroll to the checkbox area so it's visible when user switches to the tab.
         const target = checkbox || submitBtn;
         scrollToElement(target);
@@ -234,15 +249,8 @@ function handleFollowUpPage() {
           tabId: null, // background will use sender.tab
         });
 
-        // Stay in FOLLOW_UP state — don't auto-reset.
-        // User will handle it manually, then navigate back.
-        // Set a longer timeout to eventually reset if user doesn't act.
-        setTimeout(() => {
-          chrome.runtime.sendMessage({
-            type: "SET_STATE",
-            state: { phase: "SCANNING" },
-          });
-        }, 120000); // Reset after 2 minutes if no action.
+        // Everything stops here. No refresh, no reset.
+        // User handles it manually.
         return;
       }
 
@@ -263,18 +271,16 @@ function handleFollowUpPage() {
           const checkbox2 = findBottomCheckbox();
           const submitBtn2 = findButtonByLabel("submit");
           if (checkbox2 || submitBtn2) {
+            chrome.runtime.sendMessage({
+              type: "SET_STATE",
+              state: { phase: "WAITING_FOR_USER" },
+            });
             const target2 = checkbox2 || submitBtn2;
             scrollToElement(target2);
             chrome.runtime.sendMessage({
               type: "KEYWORD_MATCH_MANUAL",
               keyword: "Action required — check the box and submit",
             });
-            setTimeout(() => {
-              chrome.runtime.sendMessage({
-                type: "SET_STATE",
-                state: { phase: "SCANNING" },
-              });
-            }, 120000);
             return;
           }
 
