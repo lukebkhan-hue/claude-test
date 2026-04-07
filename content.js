@@ -203,18 +203,16 @@ function handleFollowUpPage() {
 
     if (checkbox && submitBtn) {
       console.log("[Keyword Monitor] Checking checkbox and clicking 'Submit'.");
-      if (!checkbox.checked) {
-        checkbox.click();
-      }
+      clickCheckbox(checkbox);
       chrome.runtime.sendMessage({
         type: "SET_STATE",
         state: { phase: "COMPLETE" },
       });
-      // Brief delay between check and submit to let any validation run.
+      // Longer delay between check and submit to let validation/state update.
       setTimeout(() => {
-        submitBtn.click();
+        simulateClick(submitBtn);
         resetAfterDelay();
-      }, 300);
+      }, 500);
       return;
     }
 
@@ -233,12 +231,12 @@ function handleFollowUpPage() {
       const checkbox2 = findBottomCheckbox();
       const submitBtn2 = findButtonByLabel("submit");
       if (checkbox2 && submitBtn2) {
-        if (!checkbox2.checked) checkbox2.click();
+        clickCheckbox(checkbox2);
         chrome.runtime.sendMessage({ type: "SET_STATE", state: { phase: "COMPLETE" } });
         setTimeout(() => {
-          submitBtn2.click();
+          simulateClick(submitBtn2);
           resetAfterDelay();
-        }, 300);
+        }, 500);
         return;
       }
 
@@ -251,23 +249,91 @@ function handleFollowUpPage() {
 
 function findButtonByLabel(label) {
   const lower = label.toLowerCase();
-  const btns = document.querySelectorAll(
-    'button, a, input[type="button"], input[type="submit"], [role="button"]'
+
+  // Cast a wide net: real buttons, links, divs/spans with role or click handlers.
+  const candidates = document.querySelectorAll(
+    'button, a, input[type="button"], input[type="submit"], [role="button"], ' +
+    '[class*="btn"], [class*="button"], [class*="submit"], [class*="Button"], [class*="Submit"]'
   );
-  for (const btn of btns) {
-    const text = (btn.textContent || btn.value || "").trim().toLowerCase();
+
+  for (const el of candidates) {
+    const text = (el.textContent || el.value || el.getAttribute("aria-label") || "").trim().toLowerCase();
     if (text === lower || text.includes(lower)) {
-      return btn;
+      return el;
     }
   }
+
+  // Fallback: walk ALL elements looking for one whose text matches.
+  const allEls = document.querySelectorAll("*");
+  for (const el of allEls) {
+    // Only match leaf-ish elements (avoid matching a huge container).
+    const directText = getDirectText(el).toLowerCase();
+    if (directText === lower || directText.includes(lower)) {
+      // Prefer clickable-looking elements.
+      const tag = el.tagName.toLowerCase();
+      const role = el.getAttribute("role") || "";
+      const cursor = window.getComputedStyle(el).cursor;
+      if (tag === "button" || tag === "a" || role === "button" || cursor === "pointer") {
+        return el;
+      }
+    }
+  }
+
   return null;
 }
 
+function getDirectText(el) {
+  // Get only the direct text of an element (not deeply nested children).
+  let text = "";
+  for (const child of el.childNodes) {
+    if (child.nodeType === Node.TEXT_NODE) {
+      text += child.textContent;
+    }
+  }
+  return text.trim();
+}
+
 function findBottomCheckbox() {
-  // Find all checkboxes and return the one closest to the bottom of the page.
-  const checkboxes = document.querySelectorAll('input[type="checkbox"]');
+  // Strategy 1: Real <input type="checkbox"> elements.
+  let checkboxes = Array.from(document.querySelectorAll('input[type="checkbox"]'));
+
+  // Strategy 2: Custom checkbox elements (role="checkbox", aria-checked, common class names).
+  const customCheckboxes = document.querySelectorAll(
+    '[role="checkbox"], [class*="checkbox"], [class*="Checkbox"], ' +
+    '[class*="check-box"], [class*="CheckBox"], [data-testid*="checkbox"]'
+  );
+  for (const el of customCheckboxes) {
+    if (!checkboxes.includes(el)) {
+      checkboxes.push(el);
+    }
+  }
+
+  // Strategy 3: Look for the "Agreement" section and find any clickable element near it
+  // that looks like a checkbox (small square element).
+  if (checkboxes.length === 0) {
+    const allEls = document.querySelectorAll("*");
+    for (const el of allEls) {
+      const rect = el.getBoundingClientRect();
+      // Checkboxes are typically small square elements.
+      if (rect.width >= 10 && rect.width <= 40 && rect.height >= 10 && rect.height <= 40) {
+        const ratio = rect.width / rect.height;
+        if (ratio > 0.7 && ratio < 1.4) {
+          // Check if it's near text containing "agree" or "agreement".
+          const parent = el.closest("div, section, form, fieldset") || el.parentElement;
+          if (parent) {
+            const parentText = (parent.textContent || "").toLowerCase();
+            if (parentText.includes("agree") || parentText.includes("terms") || parentText.includes("accept")) {
+              checkboxes.push(el);
+            }
+          }
+        }
+      }
+    }
+  }
+
   if (checkboxes.length === 0) return null;
 
+  // Return the one closest to the bottom of the page.
   let bottomCheckbox = null;
   let maxY = -Infinity;
 
@@ -303,6 +369,61 @@ function resetToScanning() {
     } else {
       scheduleRefresh();
     }
+  }
+}
+
+// ─── CLICK HELPERS ──────────────────────────────────────────────────────────
+
+function simulateClick(el) {
+  // Dispatch a full sequence of mouse events to trigger framework handlers.
+  const events = ["pointerdown", "mousedown", "pointerup", "mouseup", "click"];
+  for (const evtName of events) {
+    const rect = el.getBoundingClientRect();
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + rect.height / 2;
+    const evt = new MouseEvent(evtName, {
+      bubbles: true,
+      cancelable: true,
+      view: window,
+      clientX: x,
+      clientY: y,
+    });
+    el.dispatchEvent(evt);
+  }
+  // Also call .click() as a fallback.
+  el.click();
+}
+
+function clickCheckbox(cb) {
+  // For real <input type="checkbox">, set checked and fire change event.
+  if (cb.tagName === "INPUT" && cb.type === "checkbox") {
+    if (!cb.checked) {
+      cb.focus();
+      simulateClick(cb);
+      // If click didn't toggle it, force it.
+      if (!cb.checked) {
+        cb.checked = true;
+        cb.dispatchEvent(new Event("change", { bubbles: true }));
+        cb.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    }
+    return;
+  }
+
+  // For custom checkboxes (div/span with role="checkbox" etc.)
+  simulateClick(cb);
+
+  // Also try clicking the associated <label> if there is one.
+  const id = cb.getAttribute("id") || cb.getAttribute("data-id");
+  if (id) {
+    const label = document.querySelector(`label[for="${id}"]`);
+    if (label) simulateClick(label);
+  }
+
+  // Try clicking the parent label if the checkbox is nested inside one.
+  const parentLabel = cb.closest("label");
+  if (parentLabel && parentLabel !== cb) {
+    simulateClick(parentLabel);
   }
 }
 
