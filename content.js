@@ -222,7 +222,7 @@ function handleFollowUpPage() {
       const submitBtn = findButtonByLabel("submit");
 
       if (label && submitBtn) {
-        console.log("[Keyword Monitor] Found label + submit. Clicking label then submit.");
+        console.log("[Keyword Monitor] Found label + submit. Using TRUSTED clicks.");
         scrollToElement(label);
 
         chrome.runtime.sendMessage({
@@ -231,17 +231,34 @@ function handleFollowUpPage() {
           count: 1,
         });
 
-        setTimeout(async () => {
-          await humanClick(label);
-          console.log("[Keyword Monitor] Label clicked. Now clicking submit...");
-          setTimeout(async () => {
-            scrollToElement(submitBtn);
-            setTimeout(async () => {
-              await humanClick(submitBtn);
-              chrome.runtime.sendMessage({ type: "SET_STATE", state: { phase: "COMPLETE" } });
-              resetAfterDelay();
-            }, 100);
-          }, 100);
+        setTimeout(() => {
+          const labelRect = label.getBoundingClientRect();
+          const lx = labelRect.left + labelRect.width / 2;
+          const ly = labelRect.top + labelRect.height / 2;
+
+          chrome.runtime.sendMessage({
+            type: "TRUSTED_CLICK", x: lx, y: ly,
+          }, (result) => {
+            console.log("[Keyword Monitor] Trusted checkbox click result:", result);
+
+            // Wait then click submit.
+            setTimeout(() => {
+              scrollToElement(submitBtn);
+              setTimeout(() => {
+                const subRect = submitBtn.getBoundingClientRect();
+                const sx = subRect.left + subRect.width / 2;
+                const sy = subRect.top + subRect.height / 2;
+
+                chrome.runtime.sendMessage({
+                  type: "TRUSTED_CLICK", x: sx, y: sy,
+                }, (result2) => {
+                  console.log("[Keyword Monitor] Trusted submit click result:", result2);
+                  chrome.runtime.sendMessage({ type: "SET_STATE", state: { phase: "COMPLETE" } });
+                  resetAfterDelay();
+                });
+              }, 200);
+            }, 800);
+          });
         }, 500);
         return;
       }
@@ -249,29 +266,49 @@ function handleFollowUpPage() {
       // Try: generic checkbox + submit.
       const checkbox = findBottomCheckbox();
       if (checkbox && submitBtn) {
-        console.log("[Keyword Monitor] Found checkbox + submit. Clicking.");
+        console.log("[Keyword Monitor] Found checkbox + submit. Using TRUSTED clicks.");
         scrollToElement(checkbox);
-        setTimeout(async () => {
-          await clickCheckbox(checkbox);
-          setTimeout(async () => {
-            scrollToElement(submitBtn);
-            setTimeout(async () => {
-              await humanClick(submitBtn);
-              chrome.runtime.sendMessage({ type: "SET_STATE", state: { phase: "COMPLETE" } });
-              resetAfterDelay();
-            }, 100);
-          }, 100);
+        setTimeout(() => {
+          const cbRect = checkbox.getBoundingClientRect();
+          const cx = cbRect.left + cbRect.width / 2;
+          const cy = cbRect.top + cbRect.height / 2;
+
+          chrome.runtime.sendMessage({
+            type: "TRUSTED_CLICK", x: cx, y: cy,
+          }, () => {
+            setTimeout(() => {
+              scrollToElement(submitBtn);
+              setTimeout(() => {
+                const subRect = submitBtn.getBoundingClientRect();
+                const sx = subRect.left + subRect.width / 2;
+                const sy = subRect.top + subRect.height / 2;
+
+                chrome.runtime.sendMessage({
+                  type: "TRUSTED_CLICK", x: sx, y: sy,
+                }, () => {
+                  chrome.runtime.sendMessage({ type: "SET_STATE", state: { phase: "COMPLETE" } });
+                  resetAfterDelay();
+                });
+              }, 200);
+            }, 800);
+          });
         }, 500);
         return;
       }
 
-      // If only submit found (no checkbox), just click submit.
+      // If only submit found (no checkbox), just click submit with trusted click.
       if (submitBtn) {
         scrollToElement(submitBtn);
-        setTimeout(async () => {
-          await humanClick(submitBtn);
-          chrome.runtime.sendMessage({ type: "SET_STATE", state: { phase: "COMPLETE" } });
-          resetAfterDelay();
+        setTimeout(() => {
+          const subRect = submitBtn.getBoundingClientRect();
+          chrome.runtime.sendMessage({
+            type: "TRUSTED_CLICK",
+            x: subRect.left + subRect.width / 2,
+            y: subRect.top + subRect.height / 2,
+          }, () => {
+            chrome.runtime.sendMessage({ type: "SET_STATE", state: { phase: "COMPLETE" } });
+            resetAfterDelay();
+          });
         }, 300);
         return;
       }

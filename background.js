@@ -42,6 +42,67 @@ chrome.notifications.onClicked.addListener((notifId) => {
   }
 });
 
+// ─── TRUSTED CLICK VIA DEBUGGER API ─────────────────────────────────────────
+// JS-dispatched events have isTrusted=false. The chrome.debugger API sends
+// real Input events through the DevTools Protocol — these are truly trusted.
+
+async function trustedClick(tabId, x, y) {
+  try {
+    await chrome.debugger.attach({ tabId }, "1.3");
+
+    // Mouse move to target (human-like approach).
+    const steps = 8;
+    const startX = x + (Math.random() - 0.5) * 200;
+    const startY = y - 80 - Math.random() * 120;
+
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps;
+      const ease = 1 - Math.pow(1 - t, 2);
+      const cx = startX + (x - startX) * ease + (Math.random() - 0.5) * 2;
+      const cy = startY + (y - startY) * ease + (Math.random() - 0.5) * 2;
+      await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
+        type: "mouseMoved",
+        x: cx,
+        y: cy,
+      });
+      await sleep(10 + Math.random() * 15);
+    }
+
+    // Brief pause before click.
+    await sleep(30 + Math.random() * 50);
+
+    // Mouse down.
+    await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      x, y,
+      button: "left",
+      clickCount: 1,
+    });
+
+    // Brief hold.
+    await sleep(20 + Math.random() * 40);
+
+    // Mouse up.
+    await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      x, y,
+      button: "left",
+      clickCount: 1,
+    });
+
+    await chrome.debugger.detach({ tabId });
+    return { ok: true };
+  } catch (err) {
+    console.error("[Keyword Monitor] Debugger click failed:", err);
+    try { await chrome.debugger.detach({ tabId }); } catch (_) {}
+    return { ok: false, error: err.message };
+  }
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 // Listen for messages from content scripts.
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "KEYWORD_MATCH") {
@@ -54,6 +115,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     handleManualMatch(msg, sender);
     sendResponse({ ok: true });
     return;
+  }
+
+  if (msg.type === "TRUSTED_CLICK") {
+    const tabId = sender.tab?.id;
+    if (tabId) {
+      trustedClick(tabId, msg.x, msg.y).then(result => {
+        sendResponse(result);
+      });
+    } else {
+      sendResponse({ ok: false, error: "No tab ID" });
+    }
+    return true; // async response
   }
 
   if (msg.type === "GET_CONFIG") {
