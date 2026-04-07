@@ -317,58 +317,146 @@ function getDirectText(el) {
 }
 
 function findBottomCheckbox() {
-  // Strategy 1: Real <input type="checkbox"> elements.
-  let checkboxes = Array.from(document.querySelectorAll('input[type="checkbox"]'));
+  let checkboxes = [];
 
-  // Strategy 2: Custom checkbox elements (role="checkbox", aria-checked, common class names).
-  const customCheckboxes = document.querySelectorAll(
-    '[role="checkbox"], [class*="checkbox"], [class*="Checkbox"], ' +
-    '[class*="check-box"], [class*="CheckBox"], [data-testid*="checkbox"]'
-  );
-  for (const el of customCheckboxes) {
-    if (!checkboxes.includes(el)) {
-      checkboxes.push(el);
+  // Strategy 1: Real <input type="checkbox"> elements.
+  checkboxes.push(...document.querySelectorAll('input[type="checkbox"]'));
+
+  // Strategy 2: Custom checkbox elements (role, class names).
+  const customSelectors = [
+    '[role="checkbox"]',
+    '[class*="checkbox"]', '[class*="Checkbox"]',
+    '[class*="check-box"]', '[class*="CheckBox"]',
+    '[data-testid*="checkbox"]',
+    '[aria-checked]',
+  ].join(", ");
+  for (const el of document.querySelectorAll(customSelectors)) {
+    if (!checkboxes.includes(el)) checkboxes.push(el);
+  }
+
+  // If we found standard checkboxes, return the bottom-most one.
+  if (checkboxes.length > 0) {
+    return getBottomMost(checkboxes);
+  }
+
+  // Strategy 3: Find the "I agree" / "Agreement" text and look for
+  // clickable elements near it — the checkbox is likely a sibling or
+  // a small element in the same container.
+  const agreementContainer = findAgreementContainer();
+  if (!agreementContainer) return null;
+
+  // Look for anything clickable in that container.
+  // Try: labels, small square elements, SVGs, cursor:pointer elements.
+  const candidates = [];
+
+  // Labels in the container.
+  for (const lbl of agreementContainer.querySelectorAll("label")) {
+    candidates.push(lbl);
+  }
+
+  // All elements in the container — check if they look like a checkbox.
+  for (const el of agreementContainer.querySelectorAll("*")) {
+    const rect = el.getBoundingClientRect();
+    // Skip invisible or huge elements.
+    if (rect.width === 0 || rect.height === 0) continue;
+    if (rect.width > 60 || rect.height > 60) continue;
+
+    const style = window.getComputedStyle(el);
+    const isClickable = style.cursor === "pointer";
+    const hasBorder = style.borderStyle !== "none" && style.borderWidth !== "0px";
+    const isSvg = el.tagName === "svg" || el.tagName === "SVG" || el.querySelector("svg");
+    const isSmallSquare = rect.width <= 50 && rect.height <= 50 &&
+                          (rect.width / rect.height) > 0.5 &&
+                          (rect.width / rect.height) < 2;
+
+    if (isSmallSquare && (isClickable || hasBorder || isSvg)) {
+      candidates.push(el);
     }
   }
 
-  // Strategy 3: Look for the "Agreement" section and find any clickable element near it
-  // that looks like a checkbox (small square element).
-  if (checkboxes.length === 0) {
-    const allEls = document.querySelectorAll("*");
-    for (const el of allEls) {
-      const rect = el.getBoundingClientRect();
-      // Checkboxes are typically small square elements.
-      if (rect.width >= 10 && rect.width <= 40 && rect.height >= 10 && rect.height <= 40) {
-        const ratio = rect.width / rect.height;
-        if (ratio > 0.7 && ratio < 1.4) {
-          // Check if it's near text containing "agree" or "agreement".
-          const parent = el.closest("div, section, form, fieldset") || el.parentElement;
-          if (parent) {
-            const parentText = (parent.textContent || "").toLowerCase();
-            if (parentText.includes("agree") || parentText.includes("terms") || parentText.includes("accept")) {
-              checkboxes.push(el);
-            }
-          }
-        }
+  if (candidates.length > 0) {
+    return getBottomMost(candidates);
+  }
+
+  // Strategy 4: Look for hidden/off-screen <input type="checkbox"> elements
+  // inside the container. Some frameworks visually hide the real input and
+  // render a styled pseudo-element over it.
+  const hiddenInputs = agreementContainer.querySelectorAll('input[type="checkbox"]');
+  if (hiddenInputs.length > 0) {
+    return hiddenInputs[hiddenInputs.length - 1];
+  }
+
+  // Strategy 5: Look for ANY small element in the agreement container,
+  // regardless of border/cursor styles — it might be styled entirely with
+  // CSS pseudo-elements (::before / ::after).
+  for (const el of agreementContainer.querySelectorAll("*")) {
+    const rect = el.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) continue;
+    if (rect.width > 50 || rect.height > 50) continue;
+    const ratio = rect.width / rect.height;
+    if (ratio > 0.5 && ratio < 2) {
+      // Exclude text-heavy elements.
+      const text = (el.textContent || "").trim();
+      if (text.length <= 2) {
+        candidates.push(el);
       }
     }
   }
 
-  if (checkboxes.length === 0) return null;
+  if (candidates.length > 0) {
+    return getBottomMost(candidates);
+  }
 
-  // Return the one closest to the bottom of the page.
-  let bottomCheckbox = null;
-  let maxY = -Infinity;
+  // Log what's in the container for debugging.
+  console.log("[Keyword Monitor] Agreement container HTML:", agreementContainer.innerHTML.substring(0, 500));
 
-  for (const cb of checkboxes) {
-    const rect = cb.getBoundingClientRect();
-    if (rect.top > maxY) {
-      maxY = rect.top;
-      bottomCheckbox = cb;
+  return null;
+}
+
+function findAgreementContainer() {
+  // Walk text nodes to find "I agree" or "Agreement".
+  const walker = document.createTreeWalker(
+    document.body,
+    NodeFilter.SHOW_TEXT,
+    null
+  );
+
+  let agreementNode = null;
+  while (walker.nextNode()) {
+    const text = walker.currentNode.textContent.toLowerCase();
+    if (text.includes("i agree") || text.includes("agreement")) {
+      agreementNode = walker.currentNode.parentElement;
+      break;
     }
   }
 
-  return bottomCheckbox;
+  if (!agreementNode) return null;
+
+  // Walk up a few levels to find a container that likely holds the whole
+  // checkbox + label row.
+  let container = agreementNode;
+  for (let i = 0; i < 6; i++) {
+    if (!container.parentElement) break;
+    container = container.parentElement;
+    // Stop when we reach something that looks like a form section.
+    const tag = container.tagName.toLowerCase();
+    if (tag === "form" || tag === "section" || tag === "fieldset") break;
+  }
+
+  return container;
+}
+
+function getBottomMost(elements) {
+  let bottom = null;
+  let maxY = -Infinity;
+  for (const el of elements) {
+    const rect = el.getBoundingClientRect();
+    if (rect.top > maxY) {
+      maxY = rect.top;
+      bottom = el;
+    }
+  }
+  return bottom;
 }
 
 function resetAfterDelay() {
@@ -429,6 +517,8 @@ function simulateClick(el) {
 }
 
 function clickCheckbox(cb) {
+  console.log("[Keyword Monitor] clickCheckbox target:", cb.tagName, cb.className, cb.id);
+
   // For real <input type="checkbox">, set checked and fire change event.
   if (cb.tagName === "INPUT" && cb.type === "checkbox") {
     if (!cb.checked) {
@@ -445,6 +535,7 @@ function clickCheckbox(cb) {
   }
 
   // For custom checkboxes (div/span with role="checkbox" etc.)
+  // Try clicking the element itself.
   simulateClick(cb);
 
   // Also try clicking the associated <label> if there is one.
@@ -458,6 +549,24 @@ function clickCheckbox(cb) {
   const parentLabel = cb.closest("label");
   if (parentLabel && parentLabel !== cb) {
     simulateClick(parentLabel);
+  }
+
+  // If this is a container, look inside for a real checkbox we may have missed.
+  const innerCheckbox = cb.querySelector('input[type="checkbox"]');
+  if (innerCheckbox && !innerCheckbox.checked) {
+    innerCheckbox.focus();
+    simulateClick(innerCheckbox);
+    if (!innerCheckbox.checked) {
+      innerCheckbox.checked = true;
+      innerCheckbox.dispatchEvent(new Event("change", { bubbles: true }));
+      innerCheckbox.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+  }
+
+  // Try toggling aria-checked for accessible custom checkboxes.
+  const ariaChecked = cb.getAttribute("aria-checked");
+  if (ariaChecked === "false") {
+    cb.setAttribute("aria-checked", "true");
   }
 }
 
