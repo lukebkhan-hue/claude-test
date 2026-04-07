@@ -36,6 +36,9 @@ function runActions(cfg) {
       handleScanningPhase();
     } else if (phase === "FOLLOW_UP") {
       handleFollowUpPage();
+    } else if (phase === "ACTING") {
+      // Already in progress — don't re-trigger.
+      console.log("[Keyword Monitor] Action in progress, ignoring re-entry.");
     }
   });
 }
@@ -181,38 +184,47 @@ function scheduleRefresh() {
 //   - Checkbox near bottom + "Submit" button → check box, then click submit
 
 function handleFollowUpPage() {
-  console.log("[Keyword Monitor] Follow-up page detected. Scanning for actions...");
+  console.log("[Keyword Monitor] Follow-up page detected. Starting action attempts...");
 
-  // First, scroll to the very bottom so all elements are rendered and visible.
-  window.scrollTo(0, document.body.scrollHeight);
+  // Set state immediately so re-entry doesn't re-trigger this.
+  chrome.runtime.sendMessage({
+    type: "SET_STATE",
+    state: { phase: "ACTING" },
+  });
 
-  // Allow time for scroll + any lazy-loaded content to appear.
-  setTimeout(() => {
+  // Try repeatedly until we succeed — don't give up and go back to scanning.
+  let attempts = 0;
+  const maxAttempts = 20; // ~20 seconds of trying
+
+  function tryActions() {
+    attempts++;
+    console.log("[Keyword Monitor] Follow-up attempt", attempts);
+
+    // Scroll to bottom each attempt to ensure content is loaded.
     window.scrollTo(0, document.body.scrollHeight);
 
     setTimeout(() => {
-      // Try: "Express Interest" button — auto-click this one.
+      // Try: "Express Interest" button.
       const expressBtn = findButtonByLabel("express interest");
       if (expressBtn) {
-        console.log("[Keyword Monitor] Clicking 'Express Interest'.");
-        scrollToAndClick(expressBtn);
-        chrome.runtime.sendMessage({
-          type: "SET_STATE",
-          state: { phase: "COMPLETE" },
-        });
-        resetAfterDelay();
+        console.log("[Keyword Monitor] Found 'Express Interest'. Clicking.");
+        scrollToElement(expressBtn);
+        setTimeout(async () => {
+          await humanClick(expressBtn);
+          chrome.runtime.sendMessage({ type: "SET_STATE", state: { phase: "COMPLETE" } });
+          resetAfterDelay();
+        }, 300);
         return;
       }
 
-      // Checkbox + Submit page — auto-click with human-like mouse movement.
-      const checkbox = findBottomCheckbox();
+      // Try: 99designs specific — label + submit.
+      const label = document.querySelector('label[for="accept-statement"]');
       const submitBtn = findButtonByLabel("submit");
 
-      if (checkbox && submitBtn) {
-        console.log("[Keyword Monitor] Checkbox/Submit page detected. Human-clicking checkbox then submit.");
-        scrollToElement(checkbox);
+      if (label && submitBtn) {
+        console.log("[Keyword Monitor] Found label + submit. Clicking label then submit.");
+        scrollToElement(label);
 
-        // Send alert notification.
         chrome.runtime.sendMessage({
           type: "KEYWORD_MATCH",
           keyword: "checkbox page reached",
@@ -220,19 +232,35 @@ function handleFollowUpPage() {
         });
 
         setTimeout(async () => {
-          await clickCheckbox(checkbox);
-          chrome.runtime.sendMessage({
-            type: "SET_STATE",
-            state: { phase: "COMPLETE" },
-          });
-          // Wait then click submit.
+          await humanClick(label);
+          console.log("[Keyword Monitor] Label clicked. Now clicking submit...");
           setTimeout(async () => {
             scrollToElement(submitBtn);
             setTimeout(async () => {
               await humanClick(submitBtn);
+              chrome.runtime.sendMessage({ type: "SET_STATE", state: { phase: "COMPLETE" } });
               resetAfterDelay();
-            }, 50 + Math.random() * 50);
-          }, 50 + Math.random() * 50);
+            }, 100);
+          }, 100);
+        }, 500);
+        return;
+      }
+
+      // Try: generic checkbox + submit.
+      const checkbox = findBottomCheckbox();
+      if (checkbox && submitBtn) {
+        console.log("[Keyword Monitor] Found checkbox + submit. Clicking.");
+        scrollToElement(checkbox);
+        setTimeout(async () => {
+          await clickCheckbox(checkbox);
+          setTimeout(async () => {
+            scrollToElement(submitBtn);
+            setTimeout(async () => {
+              await humanClick(submitBtn);
+              chrome.runtime.sendMessage({ type: "SET_STATE", state: { phase: "COMPLETE" } });
+              resetAfterDelay();
+            }, 100);
+          }, 100);
         }, 500);
         return;
       }
@@ -244,48 +272,23 @@ function handleFollowUpPage() {
           await humanClick(submitBtn);
           chrome.runtime.sendMessage({ type: "SET_STATE", state: { phase: "COMPLETE" } });
           resetAfterDelay();
-        }, 500);
+        }, 300);
         return;
       }
 
-      // Neither pattern found — retry.
-      console.log("[Keyword Monitor] No known actions found. Retrying in 1.5s...");
-      setTimeout(() => {
-        window.scrollTo(0, document.body.scrollHeight);
+      // Nothing found yet — retry if under max attempts.
+      if (attempts < maxAttempts) {
+        console.log("[Keyword Monitor] Elements not found yet. Retrying in 1s...");
+        setTimeout(tryActions, 1000);
+      } else {
+        console.log("[Keyword Monitor] Max attempts reached. Returning to scan mode.");
+        resetToScanning();
+      }
+    }, 500); // Wait after scroll for content to render.
+  }
 
-        setTimeout(() => {
-          const expressBtn2 = findButtonByLabel("express interest");
-          if (expressBtn2) {
-            chrome.runtime.sendMessage({ type: "SET_STATE", state: { phase: "COMPLETE" } });
-            scrollToAndClick(expressBtn2);
-            resetAfterDelay();
-            return;
-          }
-
-          const checkbox2 = findBottomCheckbox();
-          const submitBtn2 = findButtonByLabel("submit");
-          if (checkbox2 && submitBtn2) {
-            scrollToElement(checkbox2);
-            setTimeout(async () => {
-              await clickCheckbox(checkbox2);
-              chrome.runtime.sendMessage({ type: "SET_STATE", state: { phase: "COMPLETE" } });
-              setTimeout(async () => {
-                scrollToElement(submitBtn2);
-                setTimeout(async () => {
-                  await humanClick(submitBtn2);
-                  resetAfterDelay();
-                }, 50 + Math.random() * 50);
-              }, 50 + Math.random() * 50);
-            }, 500);
-            return;
-          }
-
-          console.log("[Keyword Monitor] No actions found. Returning to scan mode.");
-          resetToScanning();
-        }, 500);
-      }, 1500);
-    }, 500);
-  }, 500);
+  // Start first attempt after a delay for page to load.
+  setTimeout(tryActions, 1500);
 }
 
 function findButtonByLabel(label) {
