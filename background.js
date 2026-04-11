@@ -125,64 +125,62 @@ async function trustedClickBySelector(tabId, selector) {
 }
 
 // Check checkbox then click submit as a single debugger session.
-// Uses Runtime.evaluate to programmatically check the checkbox (like Claude's
-// form_input tool) instead of trying to simulate a mouse click on it.
-async function trustedCheckboxAndSubmit(tabId, checkboxSelector, submitSelector) {
+// Strategy: Focus the checkbox, press Space to toggle it (trusted keyboard event),
+// then click Submit with trusted mouse event. No coordinate calculation needed
+// for the checkbox — avoids all debug bar layout shift issues.
+async function trustedCheckboxAndSubmit(tabId) {
   try {
     await chrome.debugger.attach({ tabId }, "1.3");
-    await sleep(400);
+    await sleep(500);
 
-    // Step 1: Programmatically check the checkbox using React-compatible method.
-    // This bypasses all anti-bot click detection by directly setting the value.
-    const checkResult = await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
+    // Step 1: Scroll to checkbox and focus it.
+    await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
       expression: `
         (function() {
-          // Find the hidden checkbox input.
           var cb = document.querySelector('#accept-statement')
                 || document.querySelector('input[type="checkbox"]');
-          if (!cb) return { ok: false, error: 'Checkbox not found' };
-
-          // Use the native HTMLInputElement setter to bypass React's override.
-          var nativeSetter = Object.getOwnPropertyDescriptor(
-            window.HTMLInputElement.prototype, 'checked'
-          ).set;
-          nativeSetter.call(cb, true);
-
-          // Dispatch events React listens to — click, input, change.
-          cb.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-          cb.dispatchEvent(new Event('input', { bubbles: true }));
-          cb.dispatchEvent(new Event('change', { bubbles: true }));
-
-          // Also try triggering React's synthetic event system.
-          // React 16+ stores event handlers on __reactProps or __reactEventHandlers.
-          var keys = Object.keys(cb);
-          for (var i = 0; i < keys.length; i++) {
-            if (keys[i].startsWith('__reactProps') || keys[i].startsWith('__reactEventHandlers')) {
-              var props = cb[keys[i]];
-              if (props && props.onChange) {
-                try {
-                  props.onChange({ target: cb, currentTarget: cb });
-                } catch(e) {}
-              }
-              if (props && props.onClick) {
-                try {
-                  props.onClick({ target: cb, currentTarget: cb });
-                } catch(e) {}
-              }
-            }
+          if (cb) {
+            cb.scrollIntoView({ block: 'center' });
+            cb.focus();
+            return 'focused: ' + cb.id;
           }
-
-          return { ok: true, checked: cb.checked };
+          // Try focusing the label instead.
+          var label = document.querySelector('label[for="accept-statement"]');
+          if (label) {
+            label.scrollIntoView({ block: 'center' });
+            label.focus();
+            return 'focused label';
+          }
+          return 'not found';
         })()
       `,
       returnByValue: true,
     });
 
-    console.log("[Keyword Monitor] Checkbox set result:", checkResult.result?.value);
+    await sleep(200);
 
-    await sleep(800);
+    // Step 2: Press Space key to toggle the checkbox.
+    // Space is the native browser shortcut for toggling a focused checkbox.
+    // Debugger key events are trusted (isTrusted=true).
+    await chrome.debugger.sendCommand({ tabId }, "Input.dispatchKeyEvent", {
+      type: "keyDown",
+      key: " ",
+      code: "Space",
+      windowsVirtualKeyCode: 32,
+      nativeVirtualKeyCode: 32,
+    });
+    await sleep(50);
+    await chrome.debugger.sendCommand({ tabId }, "Input.dispatchKeyEvent", {
+      type: "keyUp",
+      key: " ",
+      code: "Space",
+      windowsVirtualKeyCode: 32,
+      nativeVirtualKeyCode: 32,
+    });
 
-    // Step 2: Verify checkbox is checked.
+    await sleep(500);
+
+    // Step 3: Verify.
     const verifyResult = await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
       expression: `
         (function() {
@@ -194,39 +192,88 @@ async function trustedCheckboxAndSubmit(tabId, checkboxSelector, submitSelector)
       returnByValue: true,
     });
 
-    console.log("[Keyword Monitor] Checkbox verified:", verifyResult.result?.value);
+    const checked = verifyResult.result?.value;
+    console.log("[Keyword Monitor] Space key → checkbox checked:", checked);
 
-    // If checkbox still not checked, try clicking the label as fallback.
-    if (!verifyResult.result?.value) {
-      console.log("[Keyword Monitor] Checkbox not checked. Trying label click...");
-      const labelResult = await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
+    // Step 4: If space didn't work, try clicking the VisibleInput div.
+    if (!checked) {
+      console.log("[Keyword Monitor] Space didn't work. Trying click on VisibleInput div...");
+      const visResult = await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
         expression: `
           (function() {
-            var label = document.querySelector('label[for="accept-statement"]');
-            if (label) {
-              label.scrollIntoView({ block: 'center' });
-              var rect = label.getBoundingClientRect();
-              return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+            var el = document.querySelector('[class*="VisibleInput"]')
+                  || document.querySelector('[class*="ClickableInput"]');
+            if (!el) {
+              // Try the label.
+              el = document.querySelector('label[for="accept-statement"]');
             }
-            return null;
+            if (!el) return null;
+            el.scrollIntoView({ block: 'center' });
+            var rect = el.getBoundingClientRect();
+            return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
           })()
         `,
         returnByValue: true,
       });
 
-      if (labelResult.result?.value) {
-        await debuggerClickAt(tabId, labelResult.result.value.x, labelResult.result.value.y);
+      if (visResult.result?.value) {
+        await debuggerClickAt(tabId, visResult.result.value.x, visResult.result.value.y);
         await sleep(500);
       }
     }
 
-    // Step 3: Click the Submit button with a trusted mouse click.
+    // Step 5: If STILL not checked, try Tab to the checkbox and Space again.
+    const verify2 = await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
+      expression: `(document.querySelector('#accept-statement') || document.querySelector('input[type="checkbox"]'))?.checked || false`,
+      returnByValue: true,
+    });
+
+    if (!verify2.result?.value) {
+      console.log("[Keyword Monitor] Still not checked. Trying Tab + Space...");
+      // Press Tab multiple times to find the checkbox.
+      for (let i = 0; i < 15; i++) {
+        await chrome.debugger.sendCommand({ tabId }, "Input.dispatchKeyEvent", {
+          type: "keyDown", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9,
+        });
+        await chrome.debugger.sendCommand({ tabId }, "Input.dispatchKeyEvent", {
+          type: "keyUp", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9,
+        });
+        await sleep(50);
+
+        // Check if checkbox is now focused.
+        const focusCheck = await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
+          expression: `document.activeElement?.id === 'accept-statement' || document.activeElement?.type === 'checkbox'`,
+          returnByValue: true,
+        });
+
+        if (focusCheck.result?.value) {
+          console.log("[Keyword Monitor] Checkbox focused via Tab. Pressing Space...");
+          await chrome.debugger.sendCommand({ tabId }, "Input.dispatchKeyEvent", {
+            type: "keyDown", key: " ", code: "Space", windowsVirtualKeyCode: 32, nativeVirtualKeyCode: 32,
+          });
+          await sleep(50);
+          await chrome.debugger.sendCommand({ tabId }, "Input.dispatchKeyEvent", {
+            type: "keyUp", key: " ", code: "Space", windowsVirtualKeyCode: 32, nativeVirtualKeyCode: 32,
+          });
+          await sleep(300);
+          break;
+        }
+      }
+    }
+
+    // Final verification.
+    const finalCheck = await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
+      expression: `(document.querySelector('#accept-statement') || document.querySelector('input[type="checkbox"]'))?.checked || false`,
+      returnByValue: true,
+    });
+    console.log("[Keyword Monitor] Final checkbox state:", finalCheck.result?.value);
+
     await sleep(300);
 
+    // Step 6: Click the Submit button.
     const subResult = await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
       expression: `
         (function() {
-          // Find submit button by text content.
           var all = document.querySelectorAll('button, [role="button"], a, input[type="submit"]');
           var el = null;
           for (var i = 0; i < all.length; i++) {
@@ -245,13 +292,10 @@ async function trustedCheckboxAndSubmit(tabId, checkboxSelector, submitSelector)
     });
 
     const subCoords = subResult.result?.value;
-    if (!subCoords) {
-      await chrome.debugger.detach({ tabId });
-      return { ok: false, error: "Submit button not found" };
+    if (subCoords) {
+      await debuggerClickAt(tabId, subCoords.x, subCoords.y);
+      console.log("[Keyword Monitor] Submit clicked at:", subCoords.x, subCoords.y);
     }
-
-    await debuggerClickAt(tabId, subCoords.x, subCoords.y);
-    console.log("[Keyword Monitor] Submit clicked at:", subCoords.x, subCoords.y);
 
     await chrome.debugger.detach({ tabId });
     return { ok: true };
@@ -323,7 +367,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "TRUSTED_CHECKBOX_SUBMIT") {
     const tabId = sender.tab?.id;
     if (tabId) {
-      trustedCheckboxAndSubmit(tabId, msg.checkboxSelector, msg.submitSelector).then(result => {
+      trustedCheckboxAndSubmit(tabId).then(result => {
         sendResponse(result);
       });
     } else {

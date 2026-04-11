@@ -219,7 +219,7 @@ function handleFollowUpPage() {
         return;
       }
 
-      // Checkbox + Submit page — STOP and alert user for manual action.
+      // Checkbox + Submit page — use debugger Space key to toggle checkbox.
       const hasCheckbox = document.querySelector('#accept-statement') ||
                           document.querySelector('label[for="accept-statement"]') ||
                           document.querySelector('input[type="checkbox"]') ||
@@ -227,31 +227,41 @@ function handleFollowUpPage() {
       const hasSubmit = findButtonByLabel("submit");
 
       if (hasCheckbox || hasSubmit) {
-        console.log("[Keyword Monitor] Checkbox/Submit page found. Stopping for manual action.");
+        console.log("[Keyword Monitor] Checkbox/Submit page found. Using debugger Space key approach.");
 
-        // Lock state — nothing can override this.
         chrome.runtime.sendMessage({
-          type: "SET_STATE",
-          state: { phase: "WAITING_FOR_USER" },
+          type: "KEYWORD_MATCH",
+          keyword: "checkbox page reached",
+          count: 1,
         });
 
-        // Scroll to the checkbox area.
+        // Scroll to bottom first so elements are rendered.
         window.scrollTo(0, document.body.scrollHeight);
-        setTimeout(() => {
-          const target = document.querySelector('label[for="accept-statement"]') ||
-                         document.querySelector('#accept-statement') ||
-                         findBottomCheckbox() ||
-                         hasSubmit;
-          if (target) scrollToElement(target);
-        }, 300);
 
-        // Alert the user.
         chrome.runtime.sendMessage({
-          type: "KEYWORD_MATCH_MANUAL",
-          keyword: "Action required — check the box and click Submit",
+          type: "TRUSTED_CHECKBOX_SUBMIT",
+        }, (result) => {
+          console.log("[Keyword Monitor] Checkbox+Submit result:", result);
+          if (result?.ok) {
+            chrome.runtime.sendMessage({ type: "SET_STATE", state: { phase: "COMPLETE" } });
+            resetAfterDelay();
+          } else {
+            // Failed — retry.
+            if (attempts < maxAttempts) {
+              setTimeout(tryActions, 2000);
+            } else {
+              // Give up — alert user for manual action.
+              chrome.runtime.sendMessage({
+                type: "SET_STATE",
+                state: { phase: "WAITING_FOR_USER" },
+              });
+              chrome.runtime.sendMessage({
+                type: "KEYWORD_MATCH_MANUAL",
+                keyword: "Auto-click failed — please check box and submit manually",
+              });
+            }
+          }
         });
-
-        // Done. Extension fully stops here.
         return;
       }
 
