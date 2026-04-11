@@ -37,8 +37,10 @@ function runActions(cfg) {
     } else if (phase === "FOLLOW_UP") {
       handleFollowUpPage();
     } else if (phase === "ACTING") {
-      // Already in progress — don't re-trigger.
       console.log("[Keyword Monitor] Action in progress, ignoring re-entry.");
+    } else if (phase === "WAITING_FOR_USER") {
+      // Fully stopped. User must manually act then resume via popup.
+      console.log("[Keyword Monitor] Waiting for user. Do nothing.");
     }
   });
 }
@@ -204,72 +206,52 @@ function handleFollowUpPage() {
     window.scrollTo(0, document.body.scrollHeight);
 
     setTimeout(() => {
-      // Try: "Express Interest" button.
+      // Try: "Express Interest" button — auto-click this.
       const expressBtn = findButtonByLabel("express interest");
       if (expressBtn) {
-        console.log("[Keyword Monitor] Found 'Express Interest'. Trusted-clicking.");
-        chrome.runtime.sendMessage({
-          type: "TRUSTED_CLICK_SELECTOR",
-          selector: '[class*="express"], button, a',
-        }, (result) => {
-          console.log("[Keyword Monitor] Express Interest result:", result);
-          // Fallback: also try humanClick.
-          humanClick(expressBtn);
+        console.log("[Keyword Monitor] Found 'Express Interest'. Clicking.");
+        scrollToElement(expressBtn);
+        setTimeout(async () => {
+          await humanClick(expressBtn);
           chrome.runtime.sendMessage({ type: "SET_STATE", state: { phase: "COMPLETE" } });
           resetAfterDelay();
-        });
+        }, 300);
         return;
       }
 
-      // Try: checkbox + submit page.
-      // Check if we have the 99designs accept-statement checkbox.
+      // Checkbox + Submit page — STOP and alert user for manual action.
       const hasCheckbox = document.querySelector('#accept-statement') ||
                           document.querySelector('label[for="accept-statement"]') ||
+                          document.querySelector('input[type="checkbox"]') ||
                           findBottomCheckbox();
       const hasSubmit = findButtonByLabel("submit");
 
-      if (hasCheckbox && hasSubmit) {
-        console.log("[Keyword Monitor] Found checkbox + submit. Delegating to background for trusted clicks.");
+      if (hasCheckbox || hasSubmit) {
+        console.log("[Keyword Monitor] Checkbox/Submit page found. Stopping for manual action.");
 
+        // Lock state — nothing can override this.
         chrome.runtime.sendMessage({
-          type: "KEYWORD_MATCH",
-          keyword: "checkbox page reached",
-          count: 1,
+          type: "SET_STATE",
+          state: { phase: "WAITING_FOR_USER" },
         });
 
-        // Let background handle everything via debugger —
-        // it will scroll, find, and click elements with correct coords.
-        chrome.runtime.sendMessage({
-          type: "TRUSTED_CHECKBOX_SUBMIT",
-          checkboxSelector: 'label[for="accept-statement"]',
-          submitSelector: 'button, [role="button"], input[type="submit"]',
-        }, (result) => {
-          console.log("[Keyword Monitor] Trusted checkbox+submit result:", result);
-          if (result?.ok) {
-            chrome.runtime.sendMessage({ type: "SET_STATE", state: { phase: "COMPLETE" } });
-            resetAfterDelay();
-          } else {
-            // Trusted click failed — retry.
-            console.log("[Keyword Monitor] Trusted click failed, retrying...");
-            if (attempts < maxAttempts) {
-              setTimeout(tryActions, 1500);
-            } else {
-              resetToScanning();
-            }
-          }
-        });
-        return;
-      }
+        // Scroll to the checkbox area.
+        window.scrollTo(0, document.body.scrollHeight);
+        setTimeout(() => {
+          const target = document.querySelector('label[for="accept-statement"]') ||
+                         document.querySelector('#accept-statement') ||
+                         findBottomCheckbox() ||
+                         hasSubmit;
+          if (target) scrollToElement(target);
+        }, 300);
 
-      // If only submit found, click it.
-      if (hasSubmit) {
+        // Alert the user.
         chrome.runtime.sendMessage({
-          type: "TRUSTED_CLICK_SELECTOR",
-          selector: 'button, [role="button"], input[type="submit"]',
-        }, () => {
-          chrome.runtime.sendMessage({ type: "SET_STATE", state: { phase: "COMPLETE" } });
-          resetAfterDelay();
+          type: "KEYWORD_MATCH_MANUAL",
+          keyword: "Action required — check the box and click Submit",
         });
+
+        // Done. Extension fully stops here.
         return;
       }
 
