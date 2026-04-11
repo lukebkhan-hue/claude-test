@@ -124,50 +124,115 @@ async function trustedClickBySelector(tabId, selector) {
   }
 }
 
-// Click checkbox then submit as a single debugger session (attach once).
+// Check checkbox then click submit as a single debugger session.
+// Uses Runtime.evaluate to programmatically check the checkbox (like Claude's
+// form_input tool) instead of trying to simulate a mouse click on it.
 async function trustedCheckboxAndSubmit(tabId, checkboxSelector, submitSelector) {
   try {
     await chrome.debugger.attach({ tabId }, "1.3");
     await sleep(400);
 
-    // Scroll to and get checkbox coords.
-    const cbResult = await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
+    // Step 1: Programmatically check the checkbox using React-compatible method.
+    // This bypasses all anti-bot click detection by directly setting the value.
+    const checkResult = await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
       expression: `
         (function() {
-          var el = document.querySelector('${checkboxSelector}');
-          if (!el) return null;
-          el.scrollIntoView({ block: 'center' });
-          var rect = el.getBoundingClientRect();
-          return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+          // Find the hidden checkbox input.
+          var cb = document.querySelector('#accept-statement')
+                || document.querySelector('input[type="checkbox"]');
+          if (!cb) return { ok: false, error: 'Checkbox not found' };
+
+          // Use the native HTMLInputElement setter to bypass React's override.
+          var nativeSetter = Object.getOwnPropertyDescriptor(
+            window.HTMLInputElement.prototype, 'checked'
+          ).set;
+          nativeSetter.call(cb, true);
+
+          // Dispatch events React listens to — click, input, change.
+          cb.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+          cb.dispatchEvent(new Event('input', { bubbles: true }));
+          cb.dispatchEvent(new Event('change', { bubbles: true }));
+
+          // Also try triggering React's synthetic event system.
+          // React 16+ stores event handlers on __reactProps or __reactEventHandlers.
+          var keys = Object.keys(cb);
+          for (var i = 0; i < keys.length; i++) {
+            if (keys[i].startsWith('__reactProps') || keys[i].startsWith('__reactEventHandlers')) {
+              var props = cb[keys[i]];
+              if (props && props.onChange) {
+                try {
+                  props.onChange({ target: cb, currentTarget: cb });
+                } catch(e) {}
+              }
+              if (props && props.onClick) {
+                try {
+                  props.onClick({ target: cb, currentTarget: cb });
+                } catch(e) {}
+              }
+            }
+          }
+
+          return { ok: true, checked: cb.checked };
         })()
       `,
       returnByValue: true,
     });
 
-    const cbCoords = cbResult.result?.value;
-    if (!cbCoords) {
-      await chrome.debugger.detach({ tabId });
-      return { ok: false, error: "Checkbox not found" };
-    }
-
-    // Click the checkbox.
-    await debuggerClickAt(tabId, cbCoords.x, cbCoords.y);
-    console.log("[Keyword Monitor] Checkbox clicked at:", cbCoords.x, cbCoords.y);
+    console.log("[Keyword Monitor] Checkbox set result:", checkResult.result?.value);
 
     await sleep(800);
 
-    // Scroll to and get submit button coords.
+    // Step 2: Verify checkbox is checked.
+    const verifyResult = await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
+      expression: `
+        (function() {
+          var cb = document.querySelector('#accept-statement')
+                || document.querySelector('input[type="checkbox"]');
+          return cb ? cb.checked : false;
+        })()
+      `,
+      returnByValue: true,
+    });
+
+    console.log("[Keyword Monitor] Checkbox verified:", verifyResult.result?.value);
+
+    // If checkbox still not checked, try clicking the label as fallback.
+    if (!verifyResult.result?.value) {
+      console.log("[Keyword Monitor] Checkbox not checked. Trying label click...");
+      const labelResult = await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
+        expression: `
+          (function() {
+            var label = document.querySelector('label[for="accept-statement"]');
+            if (label) {
+              label.scrollIntoView({ block: 'center' });
+              var rect = label.getBoundingClientRect();
+              return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+            }
+            return null;
+          })()
+        `,
+        returnByValue: true,
+      });
+
+      if (labelResult.result?.value) {
+        await debuggerClickAt(tabId, labelResult.result.value.x, labelResult.result.value.y);
+        await sleep(500);
+      }
+    }
+
+    // Step 3: Click the Submit button with a trusted mouse click.
+    await sleep(300);
+
     const subResult = await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
       expression: `
         (function() {
-          var el = document.querySelector('${submitSelector}');
-          if (!el) {
-            // Fallback: find by text content.
-            var all = document.querySelectorAll('button, [role="button"], a, input[type="submit"]');
-            for (var i = 0; i < all.length; i++) {
-              if ((all[i].textContent || '').trim().toLowerCase().includes('submit')) {
-                el = all[i]; break;
-              }
+          // Find submit button by text content.
+          var all = document.querySelectorAll('button, [role="button"], a, input[type="submit"]');
+          var el = null;
+          for (var i = 0; i < all.length; i++) {
+            var text = (all[i].textContent || all[i].value || '').trim().toLowerCase();
+            if (text === 'submit' || text.includes('submit')) {
+              el = all[i]; break;
             }
           }
           if (!el) return null;
@@ -182,10 +247,9 @@ async function trustedCheckboxAndSubmit(tabId, checkboxSelector, submitSelector)
     const subCoords = subResult.result?.value;
     if (!subCoords) {
       await chrome.debugger.detach({ tabId });
-      return { ok: false, error: "Submit not found" };
+      return { ok: false, error: "Submit button not found" };
     }
 
-    // Click the submit button.
     await debuggerClickAt(tabId, subCoords.x, subCoords.y);
     console.log("[Keyword Monitor] Submit clicked at:", subCoords.x, subCoords.y);
 
